@@ -8,7 +8,10 @@ function Install-LatestPython {
     Invoke-WebRequest -Uri $latestVersionUrl -OutFile $pythonInstaller
     Start-Process -FilePath $pythonInstaller -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1' -Wait
     Remove-Item -Path $pythonInstaller
-    Write-Host "Latest Python version installed successfully."
+    Write-Host "Python installed successfully."
+    Write-Host "Please reopen PowerShell for the path changes to take effect, then rerun the script."
+    Read-Host -Prompt "Press Enter to exit"
+    exit 0
 }
 
 # Function to get the Python path
