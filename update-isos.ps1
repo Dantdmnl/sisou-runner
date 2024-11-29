@@ -1,18 +1,17 @@
-# Function to install Python
-function Install-Python {
-    Write-Host "Python not found. Installing Python..."
-    $pythonInstallerUrl = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe"
+
+# Function to install the latest Python version
+function Install-LatestPython {
+    Write-Host "Python not found. Installing the latest version of Python..."
+    $latestPythonVersionPage = Invoke-WebRequest -Uri "https://www.python.org/downloads/"
+    $latestVersionUrl = ($latestPythonVersionPage.ParsedHtml.getElementsByTagName("a") | Where-Object { $_.href -like "*python-*amd64.exe" }).href | Select-Object -First 1
     $pythonInstaller = "$env:TEMP\python-installer.exe"
-    Invoke-WebRequest -Uri $pythonInstallerUrl -OutFile $pythonInstaller
+    Invoke-WebRequest -Uri $latestVersionUrl -OutFile $pythonInstaller
     Start-Process -FilePath $pythonInstaller -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1' -Wait
     Remove-Item -Path $pythonInstaller
-    Write-Host "Python installed successfully."
-    Write-Host "Please reopen PowerShell for the path changes to take effect, then rerun the script."
-    Read-Host -Prompt "Press Enter to exit"
-    exit 0
+    Write-Host "Latest Python version installed successfully."
 }
 
-# Function to check for Python installation
+# Function to get the Python path
 function Get-PythonPath {
     $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
     if ($pythonExe -and $pythonExe -like "*Microsoft\WindowsApps*") {
@@ -21,26 +20,22 @@ function Get-PythonPath {
     return $pythonExe
 }
 
-# Function to check if pip is installed and install it if missing
-function Install-Pip {
-    Write-Host "pip not found. Installing pip..."
+# Function to ensure pip is installed and updated
+function Ensure-Pip {
+    Write-Host "Ensuring pip is installed and updated..."
     python -m ensurepip --upgrade
-    if ($?) {
-        python -m pip install --upgrade pip
-        Write-Host "pip installed successfully."
-    } else {
-        Write-Host "Error installing pip."
-        exit 1
-    }
+    python -m pip install --upgrade pip
+    Write-Host "pip installation and update completed."
 }
 
-# Function to install SISOU using pip
-function Install-SISOU {
-    Write-Host "Installing Super ISO Updater (SISOU)..."
-    python -m pip install sisou
+# Function to ensure SISOU is installed or updated
+function Ensure-SISOU {
+    Write-Host "Ensuring SISOU is installed or updated..."
+    python -m pip install --upgrade sisou
+    Write-Host "SISOU installation or update completed."
 }
 
-# Function to detect Ventoy drive or prompt the user to select one
+# Function to detect or prompt for Ventoy drive
 function Get-VentoyDrive {
     $ventoyDrive = Get-WmiObject Win32_Volume | Where-Object { $_.Label -eq 'Ventoy' } | Select-Object -ExpandProperty DriveLetter
     if (-not $ventoyDrive) {
@@ -54,33 +49,22 @@ function Get-VentoyDrive {
 # Step 1: Check for Python and install if not found
 $pythonPath = Get-PythonPath
 if (-not $pythonPath) {
-    Install-Python
-    exit 0
-} else {
-    Write-Host "Python is already installed at $pythonPath."
+    Install-LatestPython
+    $pythonPath = Get-PythonPath
 }
 
-# Step 2: Check for pip and install if not found
-$pipPath = Get-Command pip -ErrorAction SilentlyContinue
-if (-not $pipPath) {
-    Install-Pip
-} else {
-    Write-Host "pip is already installed."
-}
+Write-Host "Python is installed at $pythonPath."
 
-# Step 3: Check if SISOU is installed and install if missing
-$sisouInstalled = python -m pip show sisou 2>&1 | Select-String 'Name: sisou'
-if (-not $sisouInstalled) {
-    Install-SISOU
-} else {
-    Write-Host "SISOU is already installed."
-}
+# Step 2: Ensure pip is installed and updated
+Ensure-Pip
+
+# Step 3: Ensure SISOU is installed or updated
+Ensure-SISOU
 
 # Step 4: Detect or prompt for Ventoy drive
 $ventoyDrive = Get-VentoyDrive
 if (-not $ventoyDrive) {
     Write-Host "No Ventoy drive selected. Exiting..."
-    Read-Host -Prompt "Press Enter to exit"
     exit 1
 }
 
@@ -88,6 +72,5 @@ if (-not $ventoyDrive) {
 Write-Host "Running SISOU on drive $ventoyDrive..."
 python -m sisou $ventoyDrive
 
-# Pause after finishing ISO update process
 Write-Host "ISO update process completed."
-Read-Host -Prompt "Press Enter to exit"
+pause
