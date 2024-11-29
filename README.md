@@ -14,4 +14,4 @@ You can download and install Ventoy from their official repository [here](https:
 Before running this script, ensure that your PowerShell execution policy allows script execution. You can do this by running the following command in an elevated PowerShell (run as Administrator):
 
 ```powershell
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned
