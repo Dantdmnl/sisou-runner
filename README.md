@@ -15,7 +15,7 @@ Before running this script, ensure that your PowerShell execution policy allows 
 
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-
+```
 
 ## Revival roadmap
 
