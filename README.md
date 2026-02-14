@@ -15,3 +15,8 @@ Before running this script, ensure that your PowerShell execution policy allows 
 
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+## Revival roadmap
+
+A concrete recovery plan for this project is tracked in [`REVIVAL_PLAN.md`](./REVIVAL_PLAN.md).
