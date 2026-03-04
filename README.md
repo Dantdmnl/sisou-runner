@@ -2,9 +2,14 @@
 
 ## Version
 
-**Current Version:** 2.0
+**Current Version:** 2.1
 
-This release marks a major overhaul with improved automation, privacy, and user experience.
+## Changelog
+
+| Version | Highlights |
+|---------|------------|
+| 2.1     | Full PowerShell 5.1 compatibility; interactive launch menu; pause-at-exit / back-to-menu for "Run with PowerShell" (Windows 10 + 11); black console background normalisation; real-time sisou log tailing with traceback surfacing; improved dry-run output; user-friendly error messages; SISOU limitation docs; smart update pairing (removed+added → updated); pip PATH warning suppressed; Windows Store Python stubs skipped |
+| 2.0     | Major overhaul: privacy-safe JSON report, robust Ventoy detection, SHA-256 hashing, retry logic, Ctrl+C handler |
 
 ## Project Todo List
 
@@ -15,17 +20,20 @@ This release marks a major overhaul with improved automation, privacy, and user 
 - [x] SHA-256 hashing for ISOs
 - [x] Improved documentation and GDPR compliance
 - [x] Version tracking in script and logs
-- [ ] User-friendly error messages
+- [x] User-friendly error messages
+- [x] Improve dry-run output
+- [x] Command-line help for all parameters
+- [x] Document SISOU limitations
+- [x] Interactive launch menu with pause-at-exit and back-to-menu
+- [x] Real-time log tailing with traceback surfacing
+- [x] Black console background for consistent appearance
 - [ ] Expand advanced config options
 - [ ] Integration tests and example configs
 - [ ] Optimize for large ISO collections
 - [ ] Refactor for modularity
 - [ ] Support additional ISO validation
-- [ ] Improve dry-run output
-- [ ] Command-line help for all parameters
 - [ ] Cross-platform support
 - [ ] Ensure compatibility with SISOU upstream
-- [ ] Document SISOU limitations
 
 ## Overview
 
@@ -33,7 +41,7 @@ sisou-runner is a robust PowerShell wrapper for SuperISOUpdater (SISOU), automat
 
 ## Prerequisites
 
-- **Windows** with PowerShell 5.1 or later
+- **Windows** with PowerShell 5.1 or later (PowerShell 7+ recommended for parallel hashing)
 - **Ventoy** installed on your USB drive ([Ventoy project](https://github.com/ventoy/Ventoy))
 - **Internet access** for Python/SISOU installation (unless using offline options)
 - **PowerShell Execution Policy**: The script requires the execution policy to be set to `RemoteSigned` or less restrictive. To set this, run:
@@ -41,6 +49,8 @@ sisou-runner is a robust PowerShell wrapper for SuperISOUpdater (SISOU), automat
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
+
+> **PowerShell 5.1 note:** The script is fully compatible with the Windows-built-in PowerShell 5.1. The only feature that requires PS 7+ is parallel SHA-256 hashing (`-VerifyHashes`); on PS 5.1 hashing runs sequentially.
 
 ## Features
 
@@ -102,6 +112,18 @@ See `sisou-runner.ps1` for full parameter list and examples.
 
 - Logs are written to `%ProgramData%\SISOU\logs` (or custom directory)
 - JSON reports are privacy-safe (no full paths or usernames)
+
+## SISOU Known Limitations
+
+sisou-runner wraps [SuperISOUpdater (SISOU)](https://github.com/JoshuaVandaele/SuperISOUpdater). Some limitations are inherent to SISOU itself:
+
+- **Network errors** (UltimateBootCD, Fedora): transient; the runner will retry automatically.
+- **Microsoft Windows ISOs**: the Windows 11 updater can be rejected by Microsoft Sentinel in some regions. This is a Microsoft-side restriction, not a bug in the runner.
+- **ShredOS**: uses a non-numeric version scheme; SISOU cannot compare versions and will log an error.
+- **Fedora**: version detection breaks when getfedora.org changes its page layout upstream.
+- **Unknown ISOs**: SISOU only manages ISOs it has a module for. Custom or unrecognised ISOs are left untouched.
+- **Proxy support**: SISOU has no built-in proxy setting. Set `HTTPS_PROXY` / `HTTP_PROXY` in your environment before running the script.
+- **Partial downloads**: if a download is interrupted the partial file may remain on the drive with a `.part` extension; re-run the script to resume.
 
 ## Troubleshooting
 

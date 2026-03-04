@@ -7,6 +7,12 @@
         'PSAvoidUsingConvertToSecureStringWithPlainText',
         'PSUseShouldProcessForStateChangingFunctions',
         'PSUseSingularNouns',
-        'PSAvoidTrailingWhitespace'
+        'PSAvoidTrailingWhitespace',
+        # All empty catch blocks are intentional defensive swallows (non-console hosts,
+        # optional OS APIs). Adding noise statements would obscure the intent.
+        'PSAvoidUsingEmptyCatchBlock',
+        # Write-Log is an internal helper; the PS Core 6.1 cmdlet of the same name is
+        # never used in this script and this is not a redistributable module.
+        'PSAvoidOverwritingBuiltInCmdlets'
     )
 }
