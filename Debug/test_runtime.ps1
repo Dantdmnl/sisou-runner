@@ -14,7 +14,7 @@ $unstarted = New-Object System.Diagnostics.Process
 try { Stop-ChildProcess $unstarted } finally { $unstarted.Dispose() }
 $shell = (Get-Command powershell.exe).Source
 $result = Invoke-PythonCommand $shell @('-NoProfile','-Command',
-    "[Console]::Out.Write(('x' * 200000)); [Console]::Error.Write(('y' * 200000))") 20000
+    "[Console]::Out.Write(('x' * 200000)); [Console]::Error.Write(('y' * 200000))") 120000
 if ($result.ExitCode -ne 0 -or $result.StdOut.Length -ne 200000 -or $result.StdErr.Length -lt 200000) {
     throw "Large redirected output failed: exit=$($result.ExitCode), stdout=$($result.StdOut.Length), stderr=$($result.StdErr.Length)"
 }
