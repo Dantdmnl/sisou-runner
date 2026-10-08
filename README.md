@@ -8,6 +8,10 @@ A Windows PowerShell wrapper for [SuperISOUpdater (SISOU)](https://github.com/Jo
 
 Windows PowerShell 5.1 is included with Windows; PowerShell 7 is optional.
 
+Download `sisou-runner.ps1` directly from the GitHub release assets; no ZIP
+extraction or separate checksum file is needed. GitHub provides the asset digest.
+Examples and the test suite are available in the repository.
+
 Preview the drive first:
 
 ```powershell
