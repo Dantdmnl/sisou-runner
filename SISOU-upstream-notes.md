@@ -2,6 +2,9 @@
 
 Research date: 2026-06-05
 
+Local runner/source audit: 2026-10-08. Version observations below are historical
+research results, not a claim about the latest GitHub or PyPI release today.
+
 ## What SISOU Is
 
 Super ISO Updater (SISOU) is Joshua Vandaele's Python CLI for updating ISO files, primarily on a Ventoy drive. It reads a `sisou.toml` configuration, checks supported ISO families against upstream sources, downloads newer versions, and verifies downloads with checksums and, where available, signatures.
@@ -11,7 +14,7 @@ Upstream sources:
 - GitHub: https://github.com/JoshuaVandaele/SuperISOUpdater
 - PyPI: https://pypi.org/project/sisou/
 
-## Current Upstream Shape
+## Upstream Shape Observed in June 2026
 
 - PyPI latest observed: `sisou 2.2.0`, released 2026-05-12.
 - GitHub `main` observed version: `2.3.0`.
@@ -46,3 +49,19 @@ On Windows, compiled `.pyd` extensions can fail with the generic "specified modu
 - In the managed venv only, if `libtorrent` still cannot load after repair, patch SISOU's updater registry so `KaliLinux` becomes optional and disable Kali in SISOU config/default config. This is a workaround for SISOU's eager import behavior and lets non-Kali ISO updates proceed.
 - Keep dry-run mode free of Python, pip, winget, and managed runtime side effects.
 - Check for GnuPG before live runs, offer winget installation interactively, and ensure SISOU inherits a PATH containing the discovered `gpg.exe` directory.
+
+## Local Source Audit in October 2026
+
+Inspection of the installed SISOU entry point confirmed that a missing config is
+copied from its bundled template and the process returns without running updaters.
+The wrapper therefore permits empty ISO collections so this initialization works.
+
+The entry point catches exceptions while creating and running individual updaters,
+logs them, and continues. A zero process exit alone does not prove every updater
+succeeded. The wrapper counts ERROR entries in the SISOU log and reports a partial
+failure with exit code 30; it does not automatically rerun all updaters in that case.
+
+SISOU changes its working directory to the config's parent. The runner passes
+absolute config paths to avoid relative-path failures, and validates TOML syntax
+before launching download attempts. Directory values in an explicit config can
+still direct downloads outside the selected USB drive.

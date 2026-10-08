@@ -1,4 +1,4 @@
-# Version: 2.2
+# Version: 2.3
 
 <#
 .SYNOPSIS
@@ -45,8 +45,8 @@
     Wildcard patterns for ISO filenames to exclude, such as *beta*.iso.
 
 .PARAMETER VerifyHashes
-    Compute SHA-256 of every ISO before and after the run. Opt-in because reading
-    every byte of 30+ ISOs on a USB stick is slow and causes unnecessary flash wear.
+    Compute SHA-256 of every discovered ISO before and after the run. Opt-in
+    because reading every byte of a large USB collection can be slow.
 
 .PARAMETER ValidateIsoHeaders
     Check that discovered ISO files contain a readable ISO-9660 CD001 descriptor.
@@ -68,13 +68,17 @@
     No prompts. Use first Ventoy drive found, or exit 10 if none.
 
 .PARAMETER UseWinget
-    Force the winget / system-Python path even when a managed runtime is available.
+    Ensure Python through winget, then use an isolated managed SISOU environment.
 
 .PARAMETER Help
     Print usage and exit 0.
 
+.PARAMETER Menu
+    Open the interactive menu even when command-line defaults are supplied.
+
 .PARAMETER SisouArgs
-    Extra arguments forwarded verbatim to sisou (append after "--" on the command line).
+    Additional arguments forwarded to SISOU. Prefer the runner's LogLevel and
+    LogDir options for logging so its status reporting uses the same log file.
 
 .EXAMPLE
     pwsh -File sisou-runner.ps1
@@ -83,7 +87,7 @@
 .EXAMPLE
     pwsh -File sisou-runner.ps1 -NonInteractive -LogLevel DEBUG
 .EXAMPLE
-    pwsh -File sisou-runner.ps1 -SkipPipUpgrade -- --some-sisou-flag
+    pwsh -File sisou-runner.ps1 -Drive F: -SkipPipUpgrade
 
 .NOTES
     Requires PowerShell 5.1+. Python 3.12+ is supported; the runner prefers the
@@ -93,10 +97,12 @@
     0   Success
    10   No Ventoy drive found / invalid selection
    20   Python runtime bootstrap failure
-   30   SISOU returned non-zero exit code
+   30   SISOU process failure or logged updater errors
    40   Pre-flight validation failure
-   50   sisou pip install failure
+   50   Reserved installation failure code (current runtime failures return 20)
+   60   Another runner is already active
    99   Unexpected / unhandled error
+  130   Cancelled by user
 #>
 
 #Requires -Version 5.1
@@ -123,11 +129,12 @@ param(
     [switch]  $NonInteractive,
     [switch]  $UseWinget,
     [switch]  $Help,
+    [switch]  $Menu,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $SisouArgs
 )
 
-$ScriptVersion = '2.2'
+$ScriptVersion = '2.3'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -180,7 +187,7 @@ sisou-runner.ps1 - SuperISOUpdater (SISOU) wrapper
 ===================================================
 
 USAGE
-  pwsh -File sisou-runner.ps1 [OPTIONS] [-- SISOU_ARGS]
+  pwsh -File sisou-runner.ps1 [OPTIONS] [-SisouArgs <args>]
 
 OPTIONS
   -Drive <letter>         Ventoy drive letter. Auto-detected if omitted.
@@ -196,26 +203,30 @@ OPTIONS
   -ExcludeIsoPattern <p>  Wildcard ISO filename exclude filter(s).
   -VerifyHashes           SHA-256 each ISO before and after - opt-in, slow on USB.
   -ValidateIsoHeaders     Check ISO-9660 CD001 descriptors before running sisou.
-  -SkipPipUpgrade         Skip "pip install --upgrade sisou" (offline / already current).
+  -SkipPipUpgrade         Skip SISOU upgrade in an existing managed environment.
   -InstallGpg             Install GnuPG with winget if gpg.exe is missing.
   -SkipGpgCheck           Skip GnuPG pre-flight; SISOU may skip signature checks.
   -DryRun                 Preview only; sisou is not executed.
   -NonInteractive         No prompts; fail fast if input is missing.
-  -UseWinget              Force winget / system-Python path.
+  -UseWinget              Ensure Python via winget; SISOU stays in a managed venv.
   -Help                   Show this help.
-  -- <args>               Extra args forwarded verbatim to sisou.
+  -Menu                   Open the menu with supplied defaults; Enter previews.
+  -SisouArgs <args>        Additional supported SISOU arguments.
 
 EXIT CODES
    0  Success
   10  No Ventoy drive found
-  20  Python runtime bootstrap failed
-  30  sisou returned non-zero
+  20  Python runtime setup or health check failed
+  30  SISOU process failed or logged updater errors
   40  Pre-flight validation failure
-  50  sisou pip install failed
+  50  Reserved installation failure code; runtime failures currently return 20
+  60  Another runner is already active
   99  Unexpected error
+ 130  Cancelled by user
 
 SISOU KNOWN LIMITATIONS
-  - Some updaters may fail with network errors (transient; the runner retries).
+  - Non-zero SISOU process exits may be retried. Logged updater errors with a
+    zero process exit are reported as partial failures without an automatic retry.
   - Microsoft Windows ISOs require accepting Microsoft's EULA interactively;
     the Windows11 updater is blocked by Microsoft Sentinel in some regions.
   - ShredOS version strings use a non-numeric scheme; sisou cannot compare them.
@@ -251,6 +262,7 @@ $Script:StateFile   = Join-Path $Script:BaseDir 'state.json'
 $Script:LogFilePath = $null   # set by Initialize-Logging
 $Script:DryRun      = [bool]$DryRun
 $Script:ActiveProc  = $null   # tracked for Ctrl+C cleanup
+$Script:RunLock     = $null
 $Script:FromMenu    = $false  # true when user picked an option from the launch menu
 $Script:SelectedVentoyRoot = $null
 $Script:GpgExe      = $null
@@ -286,16 +298,51 @@ function Read-AdvancedConfig {
     }
 
     try {
-        $json = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $json = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($json -isnot [System.Management.Automation.PSCustomObject]) {
+            throw 'Runner config must be a JSON object.'
+        }
         $values = @{}
         foreach ($prop in $json.PSObject.Properties) { $values[$prop.Name] = $prop.Value }
+        Assert-ConfigValues -Values $values
         return $values
     } catch {
         Write-Host '' -ForegroundColor Red
-        Write-Host 'ERROR: Advanced config file is not valid JSON.' -ForegroundColor Red
+        Write-Host 'ERROR: Advanced config file is invalid.' -ForegroundColor Red
         Write-Host "  Path   : '$Path'" -ForegroundColor Yellow
         Write-Host "  Reason : $_" -ForegroundColor Yellow
         exit 40
+    }
+}
+
+function Assert-ConfigValues {
+    param([hashtable] $Values)
+    $switchNames = @('VerifyHashes','ValidateIsoHeaders','SkipPipUpgrade','InstallGpg',
+        'SkipGpgCheck','DryRun','NonInteractive','UseWinget')
+    $minimums = @{ RetryCount=1; TimeoutSeconds=30; HashThrottle=1; IsoScanDepth=-1 }
+    foreach ($key in $Values.Keys) {
+        $value = $Values[$key]
+        if ($switchNames -contains $key -and $value -isnot [bool]) {
+            throw "$key must be a JSON boolean (true or false)."
+        }
+        if ($minimums.ContainsKey($key)) {
+            if (($value -isnot [int] -and $value -isnot [long]) -or
+                $value -lt $minimums[$key] -or $value -gt [int]::MaxValue) {
+                throw "$key must be an integer between $($minimums[$key]) and $([int]::MaxValue)."
+            }
+        }
+        if (@('Drive','ConfigFile','LogDir','LogLevel') -contains $key -and $value -isnot [string]) {
+            throw "$key must be a string."
+        }
+        if (@('IncludeIsoPattern','ExcludeIsoPattern','SisouArgs') -contains $key) {
+            if ($value -isnot [array] -and $value -isnot [string]) { throw "$key must be a string or string array." }
+            foreach ($item in @($value)) {
+                if ($item -isnot [string]) { throw "$key must contain only strings." }
+            }
+        }
+        if ($key -eq 'LogLevel' -and @('DEBUG','INFO','WARNING','ERROR','CRITICAL') -notcontains $value) {
+            throw 'LogLevel must be DEBUG, INFO, WARNING, ERROR, or CRITICAL.'
+        }
     }
 }
 
@@ -352,31 +399,54 @@ Set-AdvancedConfigDefaults
 # CTRL+C / SIGINT HANDLER
 # Registered once at startup. Kills any in-flight child process cleanly.
 ###############################################################################
-$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
-    $Script:CancellationRequested = $true
-    $Script:CancellationReason = 'PowerShell exiting'
-    if ($Script:ActiveProc -and -not $Script:ActiveProc.HasExited) {
-        try { $Script:ActiveProc.Kill() } catch { }
+# ConsoleCancelEventHandler - fires before the process exits on Ctrl+C
+function Initialize-Cancellation {
+try { [Console]::TreatControlCAsInput = $false } catch { }
+if (-not ('SisouCancellation' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+public static class SisouCancellation {
+    public static volatile bool Requested;
+    public static void OnCancel(object sender, ConsoleCancelEventArgs args) {
+        args.Cancel = true;
+        Requested = true;
     }
 }
-# ConsoleCancelEventHandler - fires before the process exits on Ctrl+C
-try { [Console]::TreatControlCAsInput = $false } catch { }
-try {
-    [Console]::add_CancelKeyPress([ConsoleCancelEventHandler] {
-        param($s, $e)
-        $null = $s  # sender unused
-        $e.Cancel = $true   # prevent immediate process kill; we handle it
+'@
+}
+[SisouCancellation]::Requested = $false
+$Script:CancelHandler = [Delegate]::CreateDelegate([ConsoleCancelEventHandler],
+    [SisouCancellation].GetMethod('OnCancel'))
+[Console]::add_CancelKeyPress($Script:CancelHandler)
+}
+Initialize-Cancellation
+
+function Test-Cancellation {
+    if ([SisouCancellation]::Requested) {
         $Script:CancellationRequested = $true
         $Script:CancellationReason = 'Ctrl+C'
-        Write-Host ''
-        if ($Script:ActiveProc -and -not $Script:ActiveProc.HasExited) {
-            Write-Host '[Ctrl+C] Stopping sisou...' -ForegroundColor Yellow
-            try { $Script:ActiveProc.Kill() } catch { }
-        } else {
-            Write-Host '[Ctrl+C] Cancellation requested. Stopping at next safe point...' -ForegroundColor Yellow
-        }
-    })
-} catch { }
+    }
+    return $Script:CancellationRequested
+}
+
+function Stop-ChildProcess {
+    param([System.Diagnostics.Process] $Process)
+    if (-not $Process) { return }
+    try { $processId = $Process.Id } catch [System.InvalidOperationException] { return }
+    if ($null -eq $processId -or $processId -le 0) { return }
+    if ($Process -and -not $Process.HasExited) {
+        try {
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $processId /T /F 2>&1 | Out-Null
+        } catch { }
+        if (-not $Process.HasExited) { $Process.Kill() }
+        $null = $Process.WaitForExit(5000)
+    }
+}
+
+function ConvertTo-NativeArgument {
+    param([AllowEmptyString()][string] $Value)
+    '"' + ([regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'
+}
 
 ###############################################################################
 # LOGGING
@@ -420,11 +490,11 @@ function Wait-CancellableSleep {
 
     $remaining = [Math]::Max(0, $Seconds * 10)
     while ($remaining -gt 0) {
-        if ($Script:CancellationRequested) { return $false }
+        if (Test-Cancellation) { return $false }
         Start-Sleep -Milliseconds 100
         $remaining--
     }
-    return (-not $Script:CancellationRequested)
+    return (-not (Test-Cancellation))
 }
 
 ###############################################################################
@@ -439,15 +509,56 @@ function Save-State {
         stage     = $Stage
         timestamp = (Get-Date).ToString('o')
         data      = $Data
-    } | ConvertTo-Json -Depth 6 | Set-Content -Path $Script:StateFile -Encoding UTF8
+    } | Write-JsonAtomic -Path $Script:StateFile
+}
+
+function Write-JsonAtomic {
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)] $Value,
+        [Parameter(Mandatory)][string] $Path
+    )
+    process {
+        $destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        $temporary = $destination + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+        try {
+            $json = $Value | ConvertTo-Json -Depth 10
+            [IO.File]::WriteAllText($temporary, $json, (New-Object Text.UTF8Encoding($false)))
+            if ([IO.File]::Exists($destination)) {
+                [IO.File]::Replace($temporary, $destination, [System.Management.Automation.Language.NullString]::Value)
+            } else {
+                [IO.File]::Move($temporary, $destination)
+            }
+        } finally {
+            if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+        }
+    }
+}
+
+function Enter-RunnerLock {
+    param([string] $Directory)
+    # File sharing is enforced across processes and Windows sessions.
+    return [IO.File]::Open((Join-Path $Directory 'runner.lock'),
+        [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 }
 
 function Save-Report {
     param([hashtable] $Report)
     $Report.completed = (Get-Date).ToString('o')
     try {
-        $Report | ConvertTo-Json -Depth 10 |
-            Set-Content -Path $Script:ReportPath -Encoding UTF8
+        $safeReport = $Report | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        foreach ($iso in $safeReport.isos) {
+            if ($iso.PSObject.Properties['key']) { $iso.PSObject.Properties.Remove('key') }
+            if ($iso.PSObject.Properties['validation'] -and $iso.validation -and -not $iso.validation.valid) {
+                $iso.validation.reason = 'ISO header validation failed.'
+            }
+        }
+        $safeReport.sisou.logfile = if ($Report.sisou.logfile) { [IO.Path]::GetFileName($Report.sisou.logfile) } else { $null }
+        $safeReport.sisou.args = @()
+        foreach ($field in @('stdout_tail','stderr_tail')) {
+            if ($safeReport.sisou.PSObject.Properties[$field]) { $safeReport.sisou.PSObject.Properties.Remove($field) }
+        }
+        $safeReport.cancelReason = if ($Report.cancelled) { 'User cancellation' } else { $null }
+        $safeReport | Write-JsonAtomic -Path $Script:ReportPath
         Write-Log "Report: $Script:ReportPath"
     } catch {
         Write-Log "Could not save report: $_" "WARNING"
@@ -478,6 +589,7 @@ function Get-InstallRoot {
 ###############################################################################
 function Get-PythonVersion {
     param([string] $Exe)
+    $p = $null
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName               = $Exe
@@ -489,12 +601,17 @@ function Get-PythonVersion {
         $p = New-Object System.Diagnostics.Process
         $p.StartInfo = $psi
         $p.Start() | Out-Null
-        $p.WaitForExit(5000) | Out-Null
+        if (-not $p.WaitForExit(5000)) {
+            Stop-ChildProcess $p
+            return $null
+        }
         $raw = ($p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()).Trim()
         if ($raw -match 'Python\s+(\d+\.\d+\.\d+)') {
             return [version] $Matches[1]
         }
-    } catch { }
+    } catch { } finally {
+        if ($p) { $p.Dispose() }
+    }
     return $null
 }
 
@@ -507,30 +624,40 @@ function Invoke-PythonCommand {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $PythonExe
-    $psi.Arguments              = ($Arguments | ForEach-Object {
-        if ($_ -match '[\s"]') { '"' + ($_.Replace('"','\"')) + '"' } else { $_ }
-    }) -join ' '
+    $psi.Arguments              = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
 
+    $psi.EnvironmentVariables['PYTHONNOUSERSITE'] = '1'
+    $psi.EnvironmentVariables.Remove('PYTHONPATH')
+    $psi.EnvironmentVariables.Remove('PYTHONHOME')
+
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $psi
     try {
         $p.Start() | Out-Null
-        if (-not $p.WaitForExit($TimeoutMs)) {
-            try { $p.Kill() } catch { }
-            return @{ ExitCode=-2; StdOut=''; StdErr="Timed out after $TimeoutMs ms." }
+        $Script:ActiveProc = $p
+        $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+        $stderrTask = $p.StandardError.ReadToEndAsync()
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while (-not $p.WaitForExit(100)) {
+            if ((Test-Cancellation) -or $timer.ElapsedMilliseconds -ge $TimeoutMs) {
+                Stop-ChildProcess $p
+                if (Test-Cancellation) { throw 'User cancellation' }
+                return @{ ExitCode=-2; StdOut=''; StdErr="Timed out after $TimeoutMs ms." }
+            }
         }
         return @{
             ExitCode = $p.ExitCode
-            StdOut   = $p.StandardOutput.ReadToEnd()
-            StdErr   = $p.StandardError.ReadToEnd()
+            StdOut   = $stdoutTask.GetAwaiter().GetResult()
+            StdErr   = $stderrTask.GetAwaiter().GetResult()
         }
     } catch {
         return @{ ExitCode=-1; StdOut=''; StdErr=$_.Exception.Message }
     } finally {
+        $Script:ActiveProc = $null
         $p.Dispose()
     }
 }
@@ -571,7 +698,7 @@ function ConvertTo-SisouPath {
     if ($trimmed -match '^[A-Za-z]:[\\/]?$') {
         return ($trimmed.Substring(0, 2) + '\')
     }
-    return $trimmed
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($trimmed)
 }
 
 function Add-DirectoryToPath {
@@ -753,6 +880,10 @@ function Get-ManagedRuntime {
 
     try {
         if (Test-Path $venvPy) {
+            $existingVersion = Get-PythonVersion -Exe $venvPy
+            if (-not $existingVersion -or $existingVersion -lt [version]'3.12') {
+                throw 'Managed venv interpreter is missing or older than Python 3.12. Recreate the managed runtime.'
+            }
             Write-Log 'Managed venv already present.'
             if (-not (Install-Sisou -PythonExe $venvPy)) { return $null }
             return $venvPy
@@ -823,11 +954,15 @@ function Get-ManagedRuntime {
 # PYTHON - WINGET FALLBACK
 ###############################################################################
 function Install-PythonViaWinget {
+    if (@(Get-SystemPythonCandidates).Count -gt 0) {
+        Write-Log 'A supported Python is already installed; using it to create an isolated venv.'
+        return $true
+    }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Log 'winget not available.' "WARNING"
         return $false
     }
-    foreach ($id in 'Python.Python.3.12','Python.Python.3.11','Python.Python.3','Python.Python') {
+    foreach ($id in 'Python.Python.3.12') {
         Write-Log "winget install --id $id"
         try {
             $p = Start-Process winget `
@@ -871,11 +1006,18 @@ function Install-Sisou {
 function Test-SisouRuntime {
     param([string] $PythonExe)
 
-    $probe = 'import sisou; import modules.updaters; print("sisou-runtime-ok")'
+    $probe = 'import json,importlib.metadata; import sisou; import modules.updaters; print(json.dumps({"sisouVersion":importlib.metadata.version("sisou")}))'
     $res = Invoke-PythonCommand -PythonExe $PythonExe -Arguments @('-c', $probe) -TimeoutMs 60000
     if ($res.ExitCode -eq 0) {
+        $dependencies = Invoke-PythonCommand -PythonExe $PythonExe -Arguments @('-m','pip','check') -TimeoutMs 60000
+        if ($dependencies.ExitCode -ne 0) {
+            $detail = ($dependencies.StdOut + $dependencies.StdErr).Trim()
+            Write-Log "Managed runtime dependency check failed: $detail" 'WARNING'
+            return @{ Success=$false; Message=$detail; Version=$null }
+        }
+        $metadata = ($res.StdOut.Trim() -split "`n" | Select-Object -Last 1) | ConvertFrom-Json
         Write-Log 'SISOU runtime import check passed.' "DEBUG"
-        return @{ Success=$true; Message='' }
+        return @{ Success=$true; Message=''; Version=$metadata.sisouVersion }
     }
 
     $combined = ($res.StdOut + [System.Environment]::NewLine + $res.StdErr).Trim()
@@ -1090,7 +1232,8 @@ function Get-VentoyCandidates {
 
 function Test-IsVentoy {
     param([string] $Root)
-    $drive = $Root.TrimEnd('\').TrimEnd('/')
+    $drive = $Root.Trim().TrimEnd('\').TrimEnd('/')
+    if ($drive -match '^[A-Za-z]$') { $drive += ':' }
     return (@(Get-VentoyCandidates) -contains $drive)
 }
 
@@ -1129,8 +1272,8 @@ function Select-VentoyDrive {
                     Write-Host 'Still no Ventoy drive found.' -ForegroundColor DarkYellow
                 }
                 'M' {
-                    $m = (Read-Host 'Drive letter or path (e.g. E:)').Trim()
-                    if (Test-IsVentoy $m) { return $m }
+                    $m = (Read-Host 'Drive letter (e.g. E:)').Trim()
+                    if (Test-IsVentoy $m) { return ($m.Substring(0,1).ToUpper() + ':') }
                     Write-Host "'$m' is not a valid Ventoy drive." -ForegroundColor Red
                 }
                 'D' {
@@ -1206,8 +1349,7 @@ function Get-IsoFiles {
         Write-Log "Found $($items.Count) ISO file(s)."
         return $items
     } catch {
-        Write-Log "ISO scan failed: $_" "ERROR"
-        return @()
+        throw "ISO scan failed: $_"
     }
 }
 
@@ -1222,18 +1364,19 @@ function Get-FileHashes {
             $f = $_
             try {
                 $h = Get-FileHash -Path $f.FullName -Algorithm SHA256 -ErrorAction Stop
-                [PSCustomObject]@{ Name=$f.Name; Size=$f.Length; SHA256=$h.Hash; Error=$null }
+                [PSCustomObject]@{ FullName=$f.FullName; Name=$f.Name; Size=$f.Length; SHA256=$h.Hash; Error=$null }
             } catch {
-                [PSCustomObject]@{ Name=$f.Name; Size=$f.Length; SHA256=$null; Error=$_.Exception.Message }
+                [PSCustomObject]@{ FullName=$f.FullName; Name=$f.Name; Size=$f.Length; SHA256=$null; Error=$_.Exception.Message }
             }
         } -ThrottleLimit $ht
     } else {
         foreach ($f in $Files) {
+            if (Test-Cancellation) { throw 'Cancelled during hashing.' }
             try {
                 $h = Get-FileHash -Path $f.FullName -Algorithm SHA256 -ErrorAction Stop
-                $results += [PSCustomObject]@{ Name=$f.Name; Size=$f.Length; SHA256=$h.Hash; Error=$null }
+                $results += [PSCustomObject]@{ FullName=$f.FullName; Name=$f.Name; Size=$f.Length; SHA256=$h.Hash; Error=$null }
             } catch {
-                $results += [PSCustomObject]@{ Name=$f.Name; Size=$f.Length; SHA256=$null; Error=$_.Exception.Message }
+                $results += [PSCustomObject]@{ FullName=$f.FullName; Name=$f.Name; Size=$f.Length; SHA256=$null; Error=$_.Exception.Message }
             }
         }
     }
@@ -1247,7 +1390,7 @@ function Test-IsoHeader {
         valid  = $false
         reason = ''
     }
-    if ($File.Length -lt 34817) {
+    if ($File.Length -lt 34816) {
         $result.reason = 'File is too small to contain an ISO-9660 primary volume descriptor.'
         return $result
     }
@@ -1280,7 +1423,11 @@ function New-IsoLookup {
     $lookup = @{}
     foreach ($item in $Items) {
         $name = $null
-        if ($item -is [hashtable] -and $item.ContainsKey('name')) {
+        if ($item -is [hashtable] -and $item.ContainsKey('key')) {
+            $name = $item.key
+        } elseif ($item.PSObject.Properties['FullName']) {
+            $name = $item.FullName
+        } elseif ($item -is [hashtable] -and $item.ContainsKey('name')) {
             $name = $item.name
         } elseif ($item.PSObject.Properties['Name']) {
             $name = $item.Name
@@ -1331,8 +1478,8 @@ function ConvertFrom-EscapedUnicode {
 ###############################################################################
 # SISOU INVOCATION
 # stdout  - async line reader (sisou log output is always \n-terminated)
-# stderr  - synchronous Peek/Read poll (\r-based tqdm progress bars render correctly)
-# Ctrl+C  - $Script:ActiveProc allows the exit handler to kill the process
+# stderr  - async line reader (including tqdm carriage-return updates)
+# Ctrl+C  - native flag polled by the run loop; child process tree is stopped
 ###############################################################################
 function Invoke-Sisou {
     param(
@@ -1362,9 +1509,7 @@ function Invoke-Sisou {
     if (-not $hasF)                 { $argList.Add('-f'); $argList.Add($sisouLog)   }
     foreach ($a in $ExtraArgs) { $argList.Add($a) }
 
-    $quotedArgs = ($argList | ForEach-Object {
-        if ($_ -match '\s') { "`"$_`"" } else { $_ }
-    }) -join ' '
+    $quotedArgs = ($argList | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
 
     Write-Log "Launching: sisou $targetPath"
 
@@ -1380,6 +1525,9 @@ function Invoke-Sisou {
     $psi.EnvironmentVariables['PYTHONUNBUFFERED']        = '1'
     $psi.EnvironmentVariables['PYTHONDONTWRITEBYTECODE'] = '1'
     $psi.EnvironmentVariables['PYTHONWARNINGS']         = 'ignore' 
+    $psi.EnvironmentVariables['PYTHONNOUSERSITE'] = '1'
+    $psi.EnvironmentVariables.Remove('PYTHONPATH')
+    $psi.EnvironmentVariables.Remove('PYTHONHOME')
     $psi.EnvironmentVariables['PATH'] = $env:PATH
 
     $proc = New-Object System.Diagnostics.Process
@@ -1416,9 +1564,9 @@ function Invoke-Sisou {
         if ($conW -le 0) { $conW = 80 }
 
         while (-not $proc.HasExited) {
-            if ($Script:CancellationRequested) {
+            if (Test-Cancellation) {
                 Write-Log 'Cancellation requested - stopping sisou child process.' "WARNING"
-                try { $proc.Kill() } catch { }
+                Stop-ChildProcess $proc
                 $proc.WaitForExit(5000) | Out-Null
                 return @{ ExitCode=-3; StdOut=$stdOutBuf.ToString(); StdErr=$stdErrBuf.ToString(); LogFile=$sisouLog; Cancelled=$true }
             }
@@ -1497,7 +1645,7 @@ function Invoke-Sisou {
             
             if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) {
                 Write-Log "Timeout (${TimeoutSec}s) - killing sisou." "WARNING"
-                try { $proc.Kill() } catch { }
+                Stop-ChildProcess $proc
                 $proc.WaitForExit(5000) | Out-Null
                 return @{ ExitCode=-2; StdOut=$stdOutBuf.ToString(); StdErr=$stdErrBuf.ToString(); LogFile=$sisouLog; Cancelled=$false }
             }
@@ -1507,9 +1655,11 @@ function Invoke-Sisou {
 
         # Laatste buffers legen
         while ($stdOutQueue.TryDequeue([ref]$line)) { 
+            [void]$stdOutBuf.AppendLine($line)
             if ($null -ne $lastFileName) { Write-Host ""; $lastFileName = $null }; Write-Host (ConvertFrom-EscapedUnicode -Text $line)
         }
         while ($stdErrQueue.TryDequeue([ref]$line)) {
+            [void]$stdErrBuf.AppendLine($line)
             if ($line -match 'UserWarning:' -or $line -match 'warnings\.warn') { continue }
             if ($null -ne $lastFileName) { Write-Host ""; $lastFileName = $null }
             Write-Host (ConvertFrom-EscapedUnicode -Text $line) -ForegroundColor DarkGray
@@ -1534,7 +1684,7 @@ function Invoke-Sisou {
 
         Write-Host "" # Eindig altijd met een schone regel
 
-        if ($Script:CancellationRequested) {
+        if (Test-Cancellation) {
             return @{ ExitCode=-3; StdOut=$stdOutBuf.ToString(); StdErr=$stdErrBuf.ToString(); LogFile=$sisouLog; Cancelled=$true }
         }
 
@@ -1543,6 +1693,7 @@ function Invoke-Sisou {
     } catch {
         return @{ ExitCode=-1; StdOut=$stdOutBuf.ToString(); StdErr=$stdErrBuf.ToString() + $_; LogFile=$sisouLog; Cancelled=[bool]$Script:CancellationRequested }
     } finally {
+        Stop-ChildProcess $proc
         if ($jobOut) { Unregister-Event -SourceIdentifier $jobOut.Name; Remove-Job $jobOut -Force }
         if ($jobErr) { Unregister-Event -SourceIdentifier $jobErr.Name; Remove-Job $jobErr -Force }
         if ($logReader) { try { $logReader.Dispose() } catch { } }
@@ -1573,6 +1724,7 @@ function Assert-Inputs {
             Write-Host '  Tip          : omit -Drive to let auto-detection find your Ventoy drive.' -ForegroundColor Cyan
             exit 10
         }
+        $script:Drive = "${driveLetter}:"
         $root = "${driveLetter}:\"
         if (-not (Test-Path $root)) {
             Write-Host '' -ForegroundColor Red
@@ -1665,64 +1817,26 @@ function Resolve-SisouPython {
         }
     }
 
-    if (-not $selectedPath -and -not $UseWinget) {
-        Write-Log 'Trying direct system Python as fallback...' "WARNING"
-        $systemCandidates = @(Get-SystemPythonCandidates)
-        foreach ($candidate in $systemCandidates) {
-            Write-Log "Trying system Python $($candidate.Version)"
-            if (-not (Install-Sisou -PythonExe $candidate.Path)) { continue }
-            $health = Test-SisouRuntime -PythonExe $candidate.Path
-            if (-not $health.Success -and $health.Message -match 'libtorrent') {
-                if (Repair-SisouTorrentDependency -PythonExe $candidate.Path) {
-                    $health = Test-SisouRuntime -PythonExe $candidate.Path
-                }
-            }
-            if ($health.Success) {
-                $selectedPath = $candidate.Path
-                $selectedType = 'system'
-                break
-            }
-            Write-Log "Skipping Python $($candidate.Version): SISOU import failed." "WARNING"
-        }
-    }
-
     if (-not $selectedPath) {
         if (-not $UseWinget -and @(Get-SystemPythonCandidates).Count -gt 0) {
-            Write-Log 'Python 3.12+ is installed, but SISOU still cannot import its native torrent dependency.' "ERROR"
-            Write-Log 'winget will not repair this. Install/repair the Microsoft Visual C++ 2015-2022 Redistributable x64, then retry.' "ERROR"
+            Write-Log 'Managed SISOU environment failed; shared Python packages will not be modified.' "ERROR"
             return $null
         }
-        Write-Log 'Managed venv and direct system Python failed; trying winget...' "WARNING"
-        $selectedType = 'winget-fallback'
-        if (-not (Install-PythonViaWinget)) {
-            Write-Log 'No usable Python runtime available.' "ERROR"
-            return $null
-        }
-        # Refresh PATH so newly installed Python is visible
-        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' +
-                    [System.Environment]::GetEnvironmentVariable('PATH','User')
-        $selectedPath = Select-BestSystemPython
-        if (-not $selectedPath) {
-            Write-Log 'Python not found in PATH after winget install. Open a new shell and retry.' "ERROR"
-            return $null
-        }
-        if (-not (Install-Sisou -PythonExe $selectedPath)) { return $null }
+        if (-not (Install-PythonViaWinget)) { return $null }
+        $env:PATH = [Environment]::GetEnvironmentVariable('PATH','Machine') + ';' +
+                    [Environment]::GetEnvironmentVariable('PATH','User')
+        $selectedPath = Get-ManagedRuntime
+        $selectedType = 'managed'
+        if (-not $selectedPath) { return $null }
         $health = Test-SisouRuntime -PythonExe $selectedPath
-        if (-not $health.Success -and $health.Message -match 'libtorrent') {
-            if (Repair-SisouTorrentDependency -PythonExe $selectedPath) {
-                $health = Test-SisouRuntime -PythonExe $selectedPath
-            }
-        }
-        if (-not $health.Success) {
-            Write-Log 'Installed Python cannot import SISOU successfully.' "ERROR"
-            return $null
-        }
+        if (-not $health.Success) { return $null }
     }
 
     $selectedVersion = Get-PythonVersion -Exe $selectedPath
     return [PSCustomObject]@{
         Path    = $selectedPath
         Type    = $selectedType
+        SisouVersion = $health.Version
         Version = if ($selectedVersion) { $selectedVersion.ToString() } else { 'unknown' }
     }
 }
@@ -1732,6 +1846,48 @@ function Resolve-SisouPython {
 # Shown when the script is invoked with no arguments, e.g. via right-click
 # "Run with PowerShell" or a plain desktop shortcut.
 ###############################################################################
+function Get-MenuParameters {
+    param([System.Collections.IDictionary] $BoundParameters)
+    $parameters = @{}
+    foreach ($key in $BoundParameters.Keys) { $parameters[$key] = $BoundParameters[$key] }
+    $parameters['Menu'] = $true
+    $parameters['Drive'] = $Drive
+    $parameters['ConfigFile'] = $ConfigFile
+    if ($LogLevel) { $parameters['LogLevel'] = $LogLevel }
+    return $parameters
+}
+
+function Show-LastReport {
+    $paths = @((Join-Path $Script:BaseDir 'report.json'),
+        (Join-Path (Join-Path $env:LOCALAPPDATA 'SISOU') 'report.json')) | Select-Object -Unique
+    $files = @($paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object LastWriteTimeUtc -Descending)
+    if ($files.Count -eq 0) { Write-Host 'No saved report found.' -ForegroundColor Yellow; return }
+    try {
+        $saved = Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
+        if (-not $saved.PSObject.Properties['isos'] -or -not $saved.PSObject.Properties['mode']) {
+            throw 'Missing report fields.'
+        }
+        Write-Host "Last report: $($files[0].FullName)" -ForegroundColor Cyan
+        Write-Host "Mode: $($saved.mode)"
+        if ($saved.PSObject.Properties['completed']) { Write-Host "Completed: $($saved.completed)" }
+        if ($saved.PSObject.Properties['runnerVersion']) { Write-Host "Runner: $($saved.runnerVersion)" }
+        foreach ($status in @('updated','added','removed','unchanged','pending','hash-error')) {
+            $count = @($saved.isos | Where-Object { $_.status -eq $status }).Count
+            Write-Host "  ${status}: $count"
+        }
+        if ($saved.PSObject.Properties['cancelled'] -and $saved.cancelled) {
+            Write-Host 'Run was cancelled.' -ForegroundColor Yellow
+        }
+        if ($saved.PSObject.Properties['sisou'] -and $saved.sisou) {
+            if ($saved.sisou.PSObject.Properties['exitcode']) { Write-Host "SISOU exit: $($saved.sisou.exitcode)" }
+            if ($saved.sisou.PSObject.Properties['updaterErrors']) { Write-Host "Updater errors: $($saved.sisou.updaterErrors)" }
+        }
+    } catch {
+        Write-Host "Could not read saved report: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 function Show-LaunchMenu {
     $showBanner = $true
     while ($true) {
@@ -1742,21 +1898,30 @@ function Show-LaunchMenu {
             Write-Host "  sisou-runner v$ScriptVersion  --  ISO Update Tool" -ForegroundColor Cyan
             Write-Host ('=' * $w) -ForegroundColor Cyan
             Write-Host ''
-            Write-Host '  No arguments detected. What would you like to do?' -ForegroundColor White
+            Write-Host '  What would you like to do?' -ForegroundColor White
+            Write-Host "  Drive: $(if ($Drive) { $Drive } else { 'Auto-detect' })" -ForegroundColor DarkGray
+            Write-Host "  Config: $(if ($ConfigFile) { $ConfigFile } else { 'sisou.toml on selected drive' })" -ForegroundColor DarkGray
             Write-Host ''
             Write-Host '  [1]  Run            Auto-detect Ventoy drive and update ISOs' -ForegroundColor Green
             Write-Host '  [2]  Dry run        Preview what would be updated (no changes)' -ForegroundColor Cyan
             Write-Host '  [3]  Debug run      Same as Run, with verbose DEBUG logging' -ForegroundColor Yellow
             Write-Host '  [4]  Help           Show all parameters and exit codes' -ForegroundColor Gray
+            Write-Host '  [5]  Drive          Select a drive letter or use auto-detect' -ForegroundColor Gray
+            Write-Host '  [6]  Config         Select a SISOU TOML file or use drive default' -ForegroundColor Gray
+            Write-Host '  [7]  Last report    Show the most recent saved run' -ForegroundColor Gray
             Write-Host '  [Q]  Quit'
             Write-Host ''
             Write-Host '  Tip: pass arguments to skip this menu, e.g.  .\sisou-runner.ps1 -DryRun' -ForegroundColor DarkGray
             Write-Host ''
             $showBanner = $false
         }
-        $c = (Read-Host '  Choice (default: 1)').Trim().ToUpper()
+        if (Test-Cancellation) { return @{ Action='cancel' } }
+        $answer = Read-Host '  Choice (default: 2, preview)'
+        if (Test-Cancellation) { return @{ Action='cancel' } }
+        if ($null -eq $answer) { return @{ Action='quit' } }
+        $c = $answer.Trim().ToUpper()
         switch ($c) {
-            ''  { return @{ Action='run'; DryRun=$false; LogLevel=$null   } }
+            ''  { return @{ Action='run'; DryRun=$true; LogLevel=$null   } }
             '1' { return @{ Action='run'; DryRun=$false; LogLevel=$null   } }
             '2' { return @{ Action='run'; DryRun=$true;  LogLevel=$null   } }
             '3' { return @{ Action='run'; DryRun=$false; LogLevel='DEBUG' } }
@@ -1768,8 +1933,29 @@ function Show-LaunchMenu {
                 $null = Read-Host
                 $showBanner = $true   # redraw menu after returning
             }
+            '5' {
+                $selected = ([string](Read-Host 'Drive (e.g. F:, Enter = auto-detect)')).Trim()
+                if (-not $selected) { $script:Drive = $null }
+                elseif ($selected -match '^([A-Za-z])(?::[\\/]*)?$') {
+                    $script:Drive = $Matches[1].ToUpper() + ':'
+                } else { Write-Host 'Enter a drive letter such as F:.' -ForegroundColor Yellow }
+                $showBanner = $true
+            }
+            '6' {
+                $selected = ([string](Read-Host 'TOML path (Enter = drive default)')).Trim().Trim('"')
+                if (-not $selected) { $script:ConfigFile = $null }
+                elseif (Test-Path -LiteralPath $selected -PathType Leaf) {
+                    $script:ConfigFile = ConvertTo-SisouPath $selected
+                } else { Write-Host 'Config file was not found; selection kept.' -ForegroundColor Yellow }
+                $showBanner = $true
+            }
+            '7' {
+                Show-LastReport
+                $null = Read-Host 'Press Enter to return to the menu'
+                $showBanner = $true
+            }
             'Q' { return @{ Action='quit' } }
-            default { Write-Host '  Please enter 1, 2, 3, 4, or Q.' -ForegroundColor Yellow }
+            default { Write-Host '  Please enter 1-7 or Q.' -ForegroundColor Yellow }
         }
     }
 }
@@ -1780,10 +1966,11 @@ function Show-LaunchMenu {
 # Report intentionally omits full paths (GDPR / privacy).
 # ISO entries use filename only; drive letter is stored as a single character.
 $Report = @{
+    runnerVersion = $ScriptVersion
     started  = (Get-Date).ToString('o')
     drive    = $null          # drive letter only, e.g. "F"
     mode     = if ($Script:DryRun) { 'dry-run' } else { 'live' }
-    runtime  = @{ type=''; pythonVersion='' }
+    runtime  = @{ type=''; pythonVersion=''; sisouVersion='' }
     dependencies = @{ gpg = @{ found=$false; exe=$null } }
     config   = @{
         advancedConfig = if ([string]::IsNullOrWhiteSpace($AdvancedConfigFile)) { $null } else { [System.IO.Path]::GetFileName($AdvancedConfigFile) }
@@ -1801,27 +1988,41 @@ $Report = @{
 
 try {
     # -- Interactive launch menu (no-argument invocation) ------------------
-    if ($PSBoundParameters.Count -eq 0 -and -not $NonInteractive -and [Environment]::UserInteractive) {
-        $menu = Show-LaunchMenu
-        switch ($menu.Action) {
+    if ($Menu -and $NonInteractive) {
+        Write-Host 'ERROR: -Menu cannot be combined with -NonInteractive.' -ForegroundColor Red
+        exit 40
+    }
+    if (($PSBoundParameters.Count -eq 0 -or $Menu) -and -not $NonInteractive -and [Environment]::UserInteractive) {
+        $menuSelection = Show-LaunchMenu
+        switch ($menuSelection.Action) {
             'quit' {
                 $Script:PauseAtExit = $false   # user already interacted; no double-prompt
                 exit 0
             }
+            'cancel' { $Script:PauseAtExit = $false; exit 130 }
             'run' {
                 $Script:PauseAtExit = $true    # menu -> always a direct-launch window
                 $Script:FromMenu = $true
-                if ($menu.DryRun)   { $Script:DryRun = $true }
-                if ($menu.LogLevel) { $LogLevel = $menu.LogLevel }
+                $Script:DryRun = [bool]$menuSelection.DryRun
+                if ($menuSelection.LogLevel) { $LogLevel = $menuSelection.LogLevel }
             }
         }
     }
 
+    $Script:BaseDir = Get-InstallRoot
+    try { $Script:RunLock = Enter-RunnerLock -Directory $Script:BaseDir }
+    catch [System.IO.IOException] {
+        Write-Host 'Another SISOU runner is using this runtime. Close it before starting another run.' -ForegroundColor Yellow
+        exit 60
+    }
+    $Script:ReportPath = Join-Path $Script:BaseDir 'report.json'
+    $Script:StateFile = Join-Path $Script:BaseDir 'state.json'
+    if ([string]::IsNullOrWhiteSpace($LogDir)) { $Script:LogDir = Join-Path $Script:BaseDir 'logs' }
     Initialize-Logging
     Write-Log "sisou-runner.ps1 v$ScriptVersion starting (PowerShell $($PSVersionTable.PSVersion))"
 
     Assert-Inputs
-    if ($Script:CancellationRequested) { throw 'Cancelled before drive selection.' }
+    if (Test-Cancellation) { throw 'Cancelled before drive selection.' }
 
     # -- Ventoy selection --------------------------------------------------
     $ventoy       = Select-VentoyDrive
@@ -1858,13 +2059,16 @@ try {
             Write-Host "  3. pip install --upgrade sisou$(if ($SkipPipUpgrade) { ' (skipped by -SkipPipUpgrade)' } else { '' })" -ForegroundColor Gray
             $sisouTarget = if ($ConfigFile) { ConvertTo-SisouPath -Path $ConfigFile } else { ConvertTo-SisouPath -Path $ventoy }
             Write-Host "  4. python -m sisou $sisouTarget$(if ($LogLevel) { " -l $LogLevel" } else { '' })" -ForegroundColor Gray
+            $actionNumber = 5
             if ($RetryCount -gt 1) {
-                Write-Host "  5. Retry up to $($RetryCount - 1) time(s) on failure (backoff: 2s, 4s, ...)" -ForegroundColor Gray
+                Write-Host "  $actionNumber. Retry up to $($RetryCount - 1) time(s) on failure (backoff: 2s, 4s, ...)" -ForegroundColor Gray
+                $actionNumber++
             }
             if ($ValidateIsoHeaders) {
-                Write-Host "  6. Validate ISO-9660 CD001 headers before live runs" -ForegroundColor Gray
+                Write-Host "  $actionNumber. Validate ISO-9660 CD001 headers before live runs" -ForegroundColor Gray
+                $actionNumber++
             }
-            Write-Host "  7. Write report to $Script:ReportPath" -ForegroundColor Gray
+            Write-Host "  $actionNumber. Write report to $Script:ReportPath" -ForegroundColor Gray
             Write-Host ''
             Write-Log "[DryRun] $($files.Count) ISO(s) on $ventoy - sisou would run here."
         } else {
@@ -1880,24 +2084,39 @@ try {
     $gpgAvailable = Resolve-GpgDependency
     $Report.dependencies.gpg.found = [bool]$gpgAvailable
     $Report.dependencies.gpg.exe = if ($Script:GpgExe) { [System.IO.Path]::GetFileName($Script:GpgExe) } else { $null }
-    if ($Script:CancellationRequested) { throw 'Cancelled before runtime selection.' }
+    if (Test-Cancellation) { throw 'Cancelled before runtime selection.' }
 
     # -- Runtime selection -------------------------------------------------
     $runtime = Resolve-SisouPython
+    if (Test-Cancellation) { throw 'Cancelled during runtime setup.' }
     if (-not $runtime) { exit 20 }
     $py = $runtime.Path
     $Report.runtime.type = $runtime.Type
     $Report.runtime.pythonVersion = $runtime.Version
+    $Report.runtime.sisouVersion = $runtime.SisouVersion
     Write-Log "Python $($Report.runtime.pythonVersion) ($($Report.runtime.type))"
-    if ($Script:CancellationRequested) { throw 'Cancelled before ISO scan.' }
+    if (Test-Cancellation) { throw 'Cancelled before ISO scan.' }
+
+    # Reject malformed TOML once, before attempts or downloads.
+    $configToCheck = if ($ConfigFile) { ConvertTo-SisouPath $ConfigFile } else { Join-Path $ventoy 'sisou.toml' }
+    if (Test-Path -LiteralPath $configToCheck -PathType Leaf) {
+        Repair-Utf8Bom -Path $configToCheck | Out-Null
+        $configCheck = Invoke-PythonCommand -PythonExe $py -Arguments @('-c',
+            'import sys,tomllib; from pathlib import Path; tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))', $configToCheck)
+        if (Test-Cancellation) { throw 'Cancelled during config validation.' }
+        if ($configCheck.ExitCode -ne 0) {
+            Write-Log "SISOU TOML validation failed: $($configCheck.StdErr)" 'ERROR'
+            Save-State 'validation-failed' @{ reason='Invalid SISOU TOML' }
+            Save-Report $Report
+            exit 40
+        }
+    }
 
     # -- Validate drive + ISOs ---------------------------------------------
     if (-not $ventoy) { Write-Log 'No Ventoy drive.' "ERROR"; exit 10 }
 
     $isoFiles = @(Get-IsoFiles -Root $ventoy)
-    if ($isoFiles.Count -eq 0) {
-        Write-Log "No ISO files on $ventoy." "ERROR"; exit 40
-    }
+    if ($isoFiles.Count -eq 0) { Write-Log 'No existing ISOs; SISOU may populate the drive from its config.' }
 
     # -- Pre-run snapshot (mtime + size; optional header/SHA validation) -----
     $isoReport = New-Object 'System.Collections.Generic.List[hashtable]'
@@ -1907,6 +2126,7 @@ try {
         if ($header -and -not $header.valid) { $invalidIsoCount++ }
         $isoReport.Add(@{
             name            = $f.Name          # filename only - no full path
+            key             = $f.FullName
             size            = $f.Length
             last_write_utc  = $f.LastWriteTimeUtc.ToString('o')
             pre_sha256      = $null
@@ -1927,7 +2147,7 @@ try {
         $pre = @(Get-FileHashes -Files $isoFiles)
         $preLookup = New-IsoLookup -Items $pre
         for ($i = 0; $i -lt $isoReport.Count; $i++) {
-            $h = if ($preLookup.ContainsKey($isoReport[$i].name)) { $preLookup[$isoReport[$i].name] } else { $null }
+            $h = if ($preLookup.ContainsKey($isoReport[$i].key)) { $preLookup[$isoReport[$i].key] } else { $null }
             if ($h) { $isoReport[$i].pre_sha256 = $h.SHA256 }
         }
     }
@@ -1939,7 +2159,7 @@ try {
     $maxAttempts = [Math]::Max(1, $RetryCount)
 
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        if ($Script:CancellationRequested) {
+        if (Test-Cancellation) {
             Write-Log 'Cancellation requested before sisou attempt started.' "WARNING"
             $finalResult = @{ ExitCode=-3; StdOut=''; StdErr=''; LogFile=$null; Cancelled=$true }
             break
@@ -1962,7 +2182,7 @@ try {
 
         Write-Log "sisou exit code: $($res.ExitCode)"
 
-        if ($res.Cancelled -or $res.ExitCode -eq -3 -or $Script:CancellationRequested) {
+        if ($res.Cancelled -or $res.ExitCode -eq -3 -or (Test-Cancellation)) {
             Write-Log 'Run cancelled by user. No retry will be attempted.' "WARNING"
             $finalResult = $res
             break
@@ -1984,7 +2204,7 @@ try {
 
     if ($null -eq $finalResult) { Write-Log 'No result from sisou.' "ERROR"; exit 30 }
 
-    if ($finalResult.Cancelled -or $finalResult.ExitCode -eq -3 -or $Script:CancellationRequested) {
+    if ($finalResult.Cancelled -or $finalResult.ExitCode -eq -3 -or (Test-Cancellation)) {
         $Report.cancelled = $true
         $Report.cancelReason = if ($Script:CancellationReason) { $Script:CancellationReason } else { 'User cancellation' }
         $Report.sisou.exitcode = -3
@@ -2006,7 +2226,7 @@ try {
 
     for ($i = 0; $i -lt $Report.isos.Count; $i++) {
         $entry    = $Report.isos[$i]
-        $postFile = if ($postFileLookup.ContainsKey($entry.name)) { $postFileLookup[$entry.name] } else { $null }
+        $postFile = if ($postFileLookup.ContainsKey($entry.key)) { $postFileLookup[$entry.key] } else { $null }
         if (-not $postFile) { $Report.isos[$i].status = 'removed'; continue }
 
         $newMtime = $postFile.LastWriteTimeUtc.ToString('o')
@@ -2015,12 +2235,13 @@ try {
         $Report.isos[$i].size_post           = $newSize
 
         if ($VerifyHashes) {
-            $ph = if ($postHashLookup.ContainsKey($entry.name)) { $postHashLookup[$entry.name] } else { $null }
+            $ph = if ($postHashLookup.ContainsKey($entry.key)) { $postHashLookup[$entry.key] } else { $null }
             if ($ph) {
                 $Report.isos[$i].post_sha256 = $ph.SHA256
                 $Report.isos[$i].status = if ($ph.Error) { 'hash-error' }
                     elseif ($null -ne $ph.SHA256 -and $null -ne $entry.pre_sha256 -and
                             $ph.SHA256 -ne $entry.pre_sha256) { 'updated' }
+                    elseif ($null -eq $entry.pre_sha256) { 'hash-error' }
                     else { 'unchanged' }
             }
         } else {
@@ -2033,11 +2254,12 @@ try {
     # Newly appeared ISOs (added by sisou)
     $reportNameLookup = New-IsoLookup -Items $Report.isos
     foreach ($pf in $isoFilesPost) {
-        if (-not $reportNameLookup.ContainsKey($pf.Name)) {
+        if (-not $reportNameLookup.ContainsKey($pf.FullName)) {
             $arr = New-Object 'System.Collections.Generic.List[hashtable]'
             foreach ($x in $Report.isos) { $arr.Add($x) }
             $arr.Add(@{
                 name                = $pf.Name
+                key                 = $pf.FullName
                 size                = $null; last_write_utc=$null
                 pre_sha256          = $null; post_sha256=$null
                 size_post           = $pf.Length
@@ -2061,18 +2283,19 @@ try {
         $remBase = Get-IsoBaseName $rem.name
         if ($remBase.Length -lt 5) { continue }
         $matchedAdd = $addCandidates |
-            Where-Object { -not $claimedAdds.Contains($_.name) -and
+            Where-Object { -not $claimedAdds.Contains($_.key) -and
+                           [IO.Path]::GetDirectoryName($_.key) -eq [IO.Path]::GetDirectoryName($rem.key) -and
                            (Get-IsoBaseName $_.name) -eq $remBase } |
             Select-Object -First 1
         if ($matchedAdd) {
-            $claimedAdds.Add($matchedAdd.name) | Out-Null
-            $namesToRemove.Add($rem.name)      | Out-Null
+            $claimedAdds.Add($matchedAdd.key) | Out-Null
+            $namesToRemove.Add($rem.key)      | Out-Null
             $matchedAdd.status   = 'updated'
             $matchedAdd.old_name = $rem.name
         }
     }
     if ($namesToRemove.Count -gt 0) {
-        $Report.isos = @($Report.isos | Where-Object { -not $namesToRemove.Contains($_.name) })
+        $Report.isos = @($Report.isos | Where-Object { -not $namesToRemove.Contains($_.key) })
     }
 
     # -- Summary ------------------------------------------------------------
@@ -2082,7 +2305,12 @@ try {
     $unchanged = @($Report.isos | Where-Object { $_.status -eq 'unchanged' }).Count
     Write-Log "Summary: updated=$updated  added=$added  removed=$removed  unchanged=$unchanged"
 
-    Save-State 'completed' @{ sisouExit=$finalResult.ExitCode }
+    $upstreamErrors = 0
+    if ($finalResult.LogFile -and (Test-Path -LiteralPath $finalResult.LogFile)) {
+        $upstreamErrors = @(Select-String -LiteralPath $finalResult.LogFile -Pattern ' - ERROR - ').Count
+    }
+    $Report.sisou.updaterErrors = $upstreamErrors
+    Save-State $(if ($finalResult.ExitCode -eq 0 -and $upstreamErrors -eq 0) { 'completed' } else { 'failed' }) @{ sisouExit=$finalResult.ExitCode; updaterErrors=$upstreamErrors }
     Save-Report -Report $Report
 
     if ($finalResult.ExitCode -ne 0) {
@@ -2090,11 +2318,16 @@ try {
         exit 30
     }
 
+    if ($upstreamErrors -gt 0) {
+        Write-Log "SISOU exited successfully but logged $upstreamErrors updater error(s). See its local log." 'ERROR'
+        exit 30
+    }
+
     Write-Log 'Done.'
     exit 0
 
 } catch {
-    if ($Script:CancellationRequested) {
+    if (Test-Cancellation) {
         $Report.cancelled = $true
         $Report.cancelReason = if ($Script:CancellationReason) { $Script:CancellationReason } else { $_.Exception.Message }
         Save-State 'cancelled' @{ reason=$Report.cancelReason; attempts=$Report.sisou.attempts }
@@ -2104,10 +2337,13 @@ try {
     }
     $errMsg = 'Unhandled exception: ' + $_.Exception.Message + [System.Environment]::NewLine + $_.ScriptStackTrace
     Write-Log $errMsg "ERROR"
-    try { Save-Report -Report $Report } catch { }
+    if ($Script:RunLock) { try { Save-Report -Report $Report } catch { } }
     exit 99
 } finally {
     # Pause / offer menu return before the window closes
+    [Console]::remove_CancelKeyPress($Script:CancelHandler)
+    Stop-ChildProcess $Script:ActiveProc
+    if ($Script:RunLock) { $Script:RunLock.Dispose(); $Script:RunLock = $null }
     if ($Script:PauseAtExit) {
         Write-Host ''
         if ($Script:FromMenu) {
@@ -2116,7 +2352,8 @@ try {
             if ($c -eq 'M') {
                 # Re-invoke self with no args in the same process; menu will be shown again.
                 # Parent is still explorer, so PauseAtExit will re-detect correctly.
-                & $PSCommandPath
+                $menuParameters = Get-MenuParameters $PSBoundParameters
+                & $PSCommandPath @menuParameters
             }
         } else {
             Write-Host 'Press Enter to close this window...' -ForegroundColor DarkGray

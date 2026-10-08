@@ -1,5 +1,5 @@
-# Example SISOU config passed with:
-#   pwsh -File .\sisou-runner.ps1 -ConfigFile .\Examples\sisou-config.toml
+# Place an adapted copy of this file at F:\sisou.toml, then run:
+#   pwsh -File .\sisou-runner.ps1 -Drive F: -ConfigFile F:\sisou.toml
 #
 # SISOU paths are relative to this config file's directory. For a real Ventoy
 # drive, place this file on the drive or adjust `directory` values accordingly.

@@ -9,7 +9,7 @@
   ],
   "ExcludeIsoPattern": [
     "*beta*.iso",
-    "*test*.iso"
+    "*nightly*.iso"
   ],
   "VerifyHashes": false,
   "ValidateIsoHeaders": true,

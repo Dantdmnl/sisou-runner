@@ -1,56 +1,60 @@
-# GDPR Compliance Assessment: sisou-runner
+# Privacy and Data Handling
 
-## Overview
+Updated: 2026-10-08.
 
-sisou-runner is a PowerShell wrapper for SuperISOUpdater (SISOU) that automates ISO updates on Ventoy USB drives. This assessment reviews the script's handling of personal data and its compliance with the General Data Protection Regulation (GDPR).
+This document describes the runner's technical behavior. It does not certify GDPR compliance. The historical filename is retained for existing links.
 
-## Data Processing
+## Local Reports
 
-sisou-runner does not process, store, or transmit personal data by default. The script operates on ISO files and USB drives, focusing on system administration tasks. All logs and reports are designed to avoid collecting personally identifiable information (PII).
+`report.json` includes ISO filenames, a drive letter, file sizes and timestamps,
+optional SHA-256 hashes, statuses, scan settings, runtime versions, GnuPG
+availability, and SISOU attempt/error information.
 
-### Data Collected
+The runner removes internal absolute file identities before saving. It saves only
+the SISOU log's filename, omits forwarded SISOU argument values, removes raw
+stdout/stderr tails, and uses a generic cancellation reason.
 
-- **ISO file names** (no full paths)
-- **Drive letter** (e.g., "F:")
-- **File sizes, modification times, and hashes**
-- **Log messages and error codes**
+These measures reduce disclosure; they do not anonymize arbitrary user input.
+An ISO filename, config filename, include/exclude pattern, or renamed file can
+itself contain sensitive text. Review reports before sharing them.
 
-### Data Excluded
+`state.json` stores the most recently recorded stage, a timestamp, and stage
+details such as counts and outcomes. It is not a durable audit history. Reports
+and state use atomic replacement to preserve the prior file on write failure.
 
-- No usernames
-- No absolute file paths
-- No user-specific environment variables
-- No network addresses or device serials
+## Diagnostic Logs
 
-## Privacy-Safe Reporting
+Wrapper logs and SISOU logs retain details needed for troubleshooting. They can
+contain absolute paths, usernames, download URLs, addresses, errors, and Python
+tracebacks. They are not subject to the report's field sanitization.
 
-- JSON reports intentionally omit full paths and usernames
-- Logs are stored locally and not transmitted externally
-- No telemetry or analytics are included
+The runner writes these logs locally. It does not automatically upload logs or
+reports, and it has no built-in analytics or telemetry sender. The runner does
+not enforce automatic log retention or deletion.
 
-## Storage Locations
+## Network Activity
 
-- **Logs:** `%ProgramData%\SISOU\logs` (default; can be customized)
-- **Reports:** `%ProgramData%\SISOU\report.json` (default; can be customized)
-- **State file:** `%ProgramData%\SISOU\state.json` (default; can be customized)
+Live runs can contact Python download servers, package indexes, winget sources,
+distribution mirrors, publisher sites, and signature/key services used by the
+installed SISOU dependencies. These services receive ordinary request metadata,
+including the connecting address. Proxy settings and downstream tools can affect
+which services are contacted.
 
-All files are stored on the local machine. Users can change the log directory using the `-LogDir` parameter when running the script.
+The runner's local report policy is not a statement about third-party services'
+data handling. Dry-run mode skips runtime setup, package installation, and SISOU
+execution, but still writes local diagnostic files.
 
-## User Controls
+## Storage and Controls
 
-- Users can review and delete logs and reports at any time
-- All configuration is local; no cloud or remote storage
+Host data defaults to `%ProgramData%\SISOU`, with a
+`%LocalAppData%\SISOU` fallback when needed. `-LogDir` changes logs only;
+there are no separate report/state path parameters.
 
-## Recommendations
+SISOU TOML configuration and images normally reside on the selected USB drive.
+An explicit TOML config can direct downloads elsewhere. The managed Python
+environment remains on the host.
 
-- If integrating with external systems, ensure no PII is added to logs or reports
-- If sharing logs/reports, review for accidental inclusion of sensitive data
-- Keep software up to date to avoid vulnerabilities
-
-## Conclusion
-
-sisou-runner is designed to be GDPR-compliant by default, as it does not process or store personal data. Users are responsible for maintaining compliance if they modify the script or integrate it with other systems.
-
-## Contact
-
-For GDPR-related questions or concerns, contact the repository maintainer.
+Users can review and remove local logs or reports after a run has finished.
+Deleting the runtime also removes installed SISOU packages, so a future run will
+need setup again. Review diagnostic logs and user-chosen names before posting
+them publicly.

@@ -1,176 +1,191 @@
 # sisou-runner
 
-## Version
+A Windows PowerShell wrapper for [SuperISOUpdater (SISOU)](https://github.com/JoshuaVandaele/SuperISOUpdater) that manages ISO downloads and updates on a Ventoy drive.
 
-**Current Version:** 2.2
+**Current Version:** 2.3. See [CHANGELOG.md](CHANGELOG.md) for release notes and [GitHub Releases](https://github.com/Dantdmnl/sisou-runner/releases) for published downloads.
 
-## Changelog
+## Quick Start
 
-| Version | Highlights |
-|---------|------------|
-| 2.2     | Advanced runner JSON config defaults; ISO scan include/exclude/depth controls; optional ISO-9660 header validation; faster large-collection status lookups; upstream SISOU compatibility fixes; isolated managed SISOU venv; GnuPG pre-flight and install prompt; clean dry-run behavior; improved Ctrl+C cancellation; progress bar rendering fixes; example configs and integration checks |
-| 2.1     | Full PowerShell 5.1 compatibility; interactive launch menu; pause-at-exit / back-to-menu for "Run with PowerShell" (Windows 10 + 11); black console background normalisation; real-time sisou log tailing with traceback surfacing; improved dry-run output; user-friendly error messages; SISOU limitation docs; smart update pairing (removed+added → updated); pip PATH warning suppressed; Windows Store Python stubs skipped |
-| 2.0     | Major overhaul: privacy-safe JSON report, robust Ventoy detection, SHA-256 hashing, retry logic, Ctrl+C handler |
+Windows PowerShell 5.1 is included with Windows; PowerShell 7 is optional.
 
-## Project Todo List
-
-- [x] Major overhaul and rename
-- [x] Advanced logging and privacy reporting
-- [x] Automatic Python runtime management
-- [x] Robust Ventoy detection
-- [x] SHA-256 hashing for ISOs
-- [x] Improved documentation and GDPR compliance
-- [x] Version tracking in script and logs
-- [x] User-friendly error messages
-- [x] Improve dry-run output
-- [x] Command-line help for all parameters
-- [x] Document SISOU limitations
-- [x] Interactive launch menu with pause-at-exit and back-to-menu
-- [x] Real-time log tailing with traceback surfacing
-- [x] Black console background for consistent appearance
-- [x] Expand advanced config options
-- [x] Integration tests and example configs
-- [x] Optimize for large ISO collections
-- [ ] Refactor for modularity
-- [x] Support additional ISO validation
-- [ ] Cross-platform support
-- [ ] Ensure compatibility with SISOU upstream
-
-## Overview
-
-sisou-runner is a robust PowerShell wrapper for SuperISOUpdater (SISOU), automating ISO updates on Ventoy USB drives. It manages Python runtime setup, Ventoy drive detection, ISO integrity checks, retry logic, and privacy-safe reporting.
-
-## Prerequisites
-
-- **Windows** with PowerShell 5.1 or later (PowerShell 7+ recommended for parallel hashing)
-- **Python 3.12 or later** if using a system Python. SISOU's package metadata is looser, but upstream documentation and current source require Python 3.12+ syntax.
-- **Microsoft Visual C++ 2015-2022 Redistributable x64** may be required for SISOU's `libtorrent` dependency on Windows.
-- **GnuPG / gpg.exe** for SISOU signature verification. The runner can detect GnuPG and offer winget installation.
-- **Ventoy** installed on your USB drive ([Ventoy project](https://github.com/ventoy/Ventoy))
-- **Internet access** for Python/SISOU installation (unless using offline options)
-- **PowerShell Execution Policy**: The script requires the execution policy to be set to `RemoteSigned` or less restrictive. To set this, run:
+Preview the drive first:
 
 ```powershell
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+powershell -NoProfile -ExecutionPolicy Bypass -File .\sisou-runner.ps1 -Drive F: -DryRun -NonInteractive
 ```
 
-> **PowerShell 5.1 note:** The script is fully compatible with the Windows-built-in PowerShell 5.1. The only feature that requires PS 7+ is parallel SHA-256 hashing (`-VerifyHashes`); on PS 5.1 hashing runs sequentially.
-
-## Features
-
-- Automatic Python 3.12+ runtime detection and installation (system, managed, or via winget)
-- Installs and upgrades SuperISOUpdater (SISOU) as needed
-- Reliable Ventoy USB drive detection (multiple strategies)
-- Optional SHA-256 hashing for ISOs
-- Structured logging and privacy-safe JSON reporting
-- Handles Ctrl+C gracefully, cleans up child processes
-- Supports dry-run mode, retry logic, and custom SISOU arguments
-- Advanced error handling and reporting
-
-## Usage
-
-Run the script in PowerShell:
+Run SISOU:
 
 ```powershell
-pwsh -File sisou-runner.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\sisou-runner.ps1 -Drive F:
 ```
 
-### Common Options
+Run without parameters to open the interactive menu. Replace `powershell` with `pwsh` to use PowerShell 7.
 
-- `-Drive <letter>`: Specify Ventoy drive letter (auto-detected if omitted)
-- `-ConfigFile <path>`: Path to a SISOU `sisou.toml` file, passed as SISOU's positional `config_path`
-- `-AdvancedConfigFile <path>`: Path to a sisou-runner JSON defaults file
-- `-LogLevel <level>`: SISOU log verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- `-LogDir <path>`: Directory for logs (default: %ProgramData%\SISOU\logs)
-- `-RetryCount <n>`: Number of retry attempts on failure (default: 2)
-- `-TimeoutSeconds <n>`: Timeout per SISOU run (default: 3600)
-- `-HashThrottle <n>`: Parallel SHA-256 threads (default: 4)
-- `-IsoScanDepth <n>`: Maximum folder depth for ISO discovery (`-1` scans all folders)
-- `-IncludeIsoPattern <patterns>`: Wildcard ISO filename include filter(s)
-- `-ExcludeIsoPattern <patterns>`: Wildcard ISO filename exclude filter(s)
-- `-VerifyHashes`: Compute SHA-256 for ISOs before/after
-- `-ValidateIsoHeaders`: Check for readable ISO-9660 `CD001` descriptors before live runs
-- `-SkipPipUpgrade`: Skip SISOU upgrade step
-- `-InstallGpg`: Install GnuPG with winget if `gpg.exe` is missing
-- `-SkipGpgCheck`: Skip GnuPG pre-flight; SISOU may skip signature checks
-- `-DryRun`: Preview actions without running SISOU
-- `-NonInteractive`: No prompts; fail fast if input is missing
-- `-UseWinget`: Force winget/system Python
-- `-Help`: Print usage and exit
-- `-- <args>`: Extra arguments forwarded to SISOU
+The menu offers Run, Dry run, Debug run, Help, drive selection, TOML selection,
+and a summary of the latest saved report. Enter selects a dry-run preview;
+choose 1 explicitly to download/update images. Selected drive/config settings are
+shown at the top, and Back to menu keeps supplied defaults and selections.
 
-#### Example: Full Automated Run
+Use `-Menu` to open the menu with command-line or JSON defaults:
 
 ```powershell
-pwsh -File sisou-runner.ps1 -LogLevel INFO -RetryCount 3 -VerifyHashes -- --my-sisou-flag
+powershell -NoProfile -ExecutionPolicy Bypass -File .\sisou-runner.ps1 -Menu -Drive F: -AdvancedConfigFile .\Examples\runner-config.json
 ```
 
-#### Example: Dry Run
+If the drive has no `sisou.toml`, the first live run creates `F:\sisou.toml` and returns without downloading images. An empty ISO collection is supported. Review the config's enabled updaters, then run again. The generated defaults can enable many large downloads.
+
+## Requirements
+
+- Windows and PowerShell 5.1 or later.
+- A Ventoy data partition accessible to the current user.
+- Python 3.12 or later. An installed interpreter can create the managed environment; otherwise the runner attempts Python installation.
+- Internet access for installation, upgrades, and upstream image checks/downloads. `-SkipPipUpgrade` skips an existing SISOU installation's upgrade; it does not make image updates work offline.
+- GnuPG for signature verification when supported by the upstream updater. The runner can locate it or offer installation through winget.
+- Native torrent support may require the Microsoft Visual C++ Redistributable x64.
+
+The one-command examples use a process-scoped execution policy. Organization policy can still prevent execution. Administrator rights are not required for every run; installation and protected storage may require elevation.
+
+## Runtime and USB Storage
+
+The runtime intentionally lives on the Windows host:
+
+| Data                               | Default location                     |
+| ---------------------------------- | ------------------------------------ |
+| Managed SISOU environment          | `%ProgramData%\SISOU\runtime\venv`   |
+| Downloaded Python, when needed     | `%ProgramData%\SISOU\runtime\python` |
+| Wrapper and SISOU logs             | `%ProgramData%\SISOU\logs`           |
+| Latest JSON report                 | `%ProgramData%\SISOU\report.json`    |
+| Latest stage information           | `%ProgramData%\SISOU\state.json`     |
+| Runtime lock                       | `%ProgramData%\SISOU\runner.lock`    |
+| SISOU config without `-ConfigFile` | `<selected-drive>\sisou.toml`        |
+
+The runner uses `%LocalAppData%\SISOU` when its ProgramData storage is not writable. `-LogDir` changes only the log directory.
+
+Shared system Python packages are not modified. The managed environment is checked for a supported interpreter, successful SISOU imports, and consistent package requirements through `pip check`. Python library paths inherited through `PYTHONPATH` and `PYTHONHOME` are removed from child processes.
+
+A custom TOML config controls its own download directories, resolved relative to that config's directory. Passing a config stored on the host can therefore save images on the host. The runner's ISO snapshot still scans the selected Ventoy drive; it is not a report of unrelated output directories.
+
+The lock prevents overlapping runner processes from changing the same runtime and reports. It is released when the process exits. The file may remain present; its existence alone does not mean a run is active.
+
+## Configuration
+
+There are two independent configuration files:
+
+| File        | Purpose                                                                           |
+| ----------- | --------------------------------------------------------------------------------- |
+| Runner JSON | Runtime setup, retries, scanning, hashing, and wrapper defaults                   |
+| SISOU TOML  | Enabled image families, editions, architectures, naming, and download directories |
 
 ```powershell
-pwsh -File sisou-runner.ps1 -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File .\sisou-runner.ps1 -Drive F: -AdvancedConfigFile .\Examples\runner-config.json
 ```
 
-#### Example: Custom Config
+Explicit command-line parameters override JSON defaults. Switch values must be JSON booleans; numeric settings must be integers in their allowed ranges. Unknown JSON options produce a warning and are ignored. The runner validates TOML syntax before download attempts and removes a UTF-8 BOM when found.
+
+[Examples/runner-config.json](Examples/runner-config.json) contains runner defaults. [Examples/sisou-config.toml](Examples/sisou-config.toml) enables Ubuntu as a small starting selection. Place an adapted TOML on the USB drive before using it:
 
 ```powershell
-pwsh -File sisou-runner.ps1 -ConfigFile "C:\path\to\config.toml"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\sisou-runner.ps1 -Drive F: -ConfigFile "F:\sisou.toml"
 ```
 
-#### Example: Runner Defaults File
+## Options
 
-```powershell
-pwsh -File sisou-runner.ps1 -AdvancedConfigFile .\Examples\runner-config.json
-```
+Run `powershell -File .\sisou-runner.ps1 -Help` for built-in help.
 
-Command-line parameters override values from `-AdvancedConfigFile`, so you can keep team defaults in JSON and still run one-off overrides such as:
+| Option                                      | Behavior / default                                                                   |
+| ------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `-Drive`                                    | Ventoy drive; accepts `F`, `F:`, or `F:\`. Auto-detected when omitted.               |
+| `-ConfigFile`                               | SISOU TOML path, passed as its positional config argument.                           |
+| `-AdvancedConfigFile`                       | Runner JSON defaults file.                                                           |
+| `-LogLevel`                                 | SISOU verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL.                              |
+| `-LogDir`                                   | Override the directory for local diagnostic logs.                                    |
+| `-RetryCount`                               | Total attempts, including the first; default 2, minimum 1.                           |
+| `-TimeoutSeconds`                           | Per-attempt timeout; default 3600, minimum 30 seconds.                               |
+| `-IsoScanDepth`                             | Scan subfolder depth; default -1 (unlimited), 0 for drive root only.                 |
+| `-IncludeIsoPattern` / `-ExcludeIsoPattern` | Wildcard filters for wrapper ISO discovery.                                          |
+| `-VerifyHashes`                             | Compare SHA-256 before/after; disabled by default.                                   |
+| `-HashThrottle`                             | Parallel hash workers on PowerShell 7; default 4, minimum 1.                         |
+| `-ValidateIsoHeaders`                       | Check the ISO-9660 `CD001` signature before running SISOU.                           |
+| `-SkipPipUpgrade`                           | Skip upgrading SISOU in an existing managed environment.                             |
+| `-InstallGpg`                               | Attempt winget installation if GnuPG is missing.                                     |
+| `-SkipGpgCheck`                             | Skip the GnuPG preflight.                                                            |
+| `-DryRun`                                   | Preview local discovery/actions; do not execute SISOU or install packages.           |
+| `-NonInteractive`                           | Suppress prompts; use the first detected Ventoy candidate.                           |
+| `-UseWinget`                                | Ensure supported Python via the winget route; SISOU still uses a managed venv.       |
+| `-SisouArgs`                                | Additional native SISOU arguments; only use flags supported by your installed SISOU. |
+| `-Help`                                     | Show help and exit.                                                                  |
+| `-Menu`                                     | Open the menu with supplied defaults; incompatible with `-NonInteractive`.           |
 
-```powershell
-pwsh -File sisou-runner.ps1 -AdvancedConfigFile .\Examples\runner-config.json -DryRun -LogLevel DEBUG
-```
+Scan filters affect wrapper validation and reporting only. Change `sisou.toml` to control downloads. Scanning reports `.iso` files; other images, such as `.img`, are not included.
 
-See `sisou-runner.ps1` for full parameter list and examples.
+SHA-256 comparison detects content changes but is not a verification against a trusted publisher checksum. ISO header validation is a format check, not an authenticity check, and can reject images without an ISO-9660 descriptor.
 
-## Examples & Checks
+## Run Outcomes
 
-- `Examples\runner-config.json`: sisou-runner defaults for retries, scan filters, hashing, and validation.
-- `Examples\sisou-config.toml`: starter SISOU config passed through `-ConfigFile`.
-- `Debug\test_syntax.ps1`: parser and quality checks.
-- `Debug\test_integration.ps1`: offline integration checks for examples, runner parameters, and ISO header validation.
+| Exit code   | Meaning                                                                                  |
+| ----------- | ---------------------------------------------------------------------------------------- |
+| 0           | Successful run or dry run; also used when SISOU only creates its initial config.         |
+| 10          | Missing or unrecognized Ventoy drive / invalid selection.                                |
+| 20          | Managed runtime setup or health check failed.                                            |
+| 30          | SISOU exited unsuccessfully or logged updater errors despite exiting zero.               |
+| 40          | Invalid inputs, runner config, TOML syntax, or ISO header validation failure.            |
+| 50          | Reserved/documented installation failure code; current runtime setup failures return 20. |
+| 60          | Another runner holds the runtime lock.                                                   |
+| 99          | Unexpected wrapper error.                                                                |
+| 130         | User cancellation recognized by the wrapper.                                             |
 
-## Logging & Reports
+A non-zero SISOU process exit can trigger retries with exponential backoff. Upstream per-updater errors often leave the SISOU process exit code at zero; these are counted and reported as a partial failure without automatically rerunning every updater.
 
-- Logs are written to `%ProgramData%\SISOU\logs` (or custom directory)
-- JSON reports are privacy-safe (no full paths or usernames)
+Use the runner's logging options rather than overriding SISOU's log file through
+`-SisouArgs`. The wrapper's log tailing and updater-error count currently follow
+its own generated SISOU log path.
 
-## SISOU Known Limitations
+Ctrl+C requests cancellation, stops the active Python process tree, suppresses retries, and records cancellation when the wrapper can complete its cleanup. Cancellation checks during other phases occur at the next checkpoint; a hash read already in progress may take time to finish. Force-ending the process or closing its host does not guarantee a final report.
 
-sisou-runner wraps [SuperISOUpdater (SISOU)](https://github.com/JoshuaVandaele/SuperISOUpdater). Some limitations are inherent to SISOU itself:
+## Reports and Privacy
 
-- **Network errors** (UltimateBootCD, Fedora): transient; the runner will retry automatically.
-- **GnuPG missing**: SISOU downloads can continue, but signature verification is skipped for signed downloads. Install `GnuPG.GnuPG` or `GnuPG.Gpg4win` with winget.
-- **Kali / libtorrent on Windows**: SISOU imports the Kali torrent updater at startup. If native `libtorrent` DLL loading fails, the managed runner venv disables Kali so other ISOs can still be updated. Repair/install the Microsoft Visual C++ Redistributable x64 to restore Kali support.
-- **Microsoft Windows ISOs**: the Windows 11 updater can be rejected by Microsoft Sentinel in some regions. This is a Microsoft-side restriction, not a bug in the runner.
-- **ShredOS**: uses a non-numeric version scheme; SISOU cannot compare versions and will log an error.
-- **Fedora**: version detection breaks when getfedora.org changes its page layout upstream.
-- **Unknown ISOs**: SISOU only manages ISOs it has a module for. Custom or unrecognised ISOs are left untouched.
-- **Proxy support**: SISOU has no built-in proxy setting. Set `HTTPS_PROXY` / `HTTP_PROXY` in your environment before running the script.
-- **Partial downloads**: if a download is interrupted the partial file may remain on the drive with a `.part` extension; re-run the script to resume.
+The report stores filenames, sizes, timestamps, optional hashes, status changes, runtime versions, GnuPG availability, and updater error counts. Internal absolute file identities are used to distinguish identical filenames in different directories, then removed before serialization. Removed/added version pairs are matched heuristically within the same directory.
 
-See `SISOU-upstream-notes.md` for researched notes about SISOU's current CLI, Python version reality, and native torrent dependency behavior.
+Raw forwarded arguments and stdout/stderr tails are omitted from reports. Logs retain detailed errors, paths, and tracebacks and can contain usernames or other sensitive data. Filenames and configured patterns can also contain user-chosen sensitive text.
+
+State and report writes use atomic replacement. A failed replacement preserves the previous JSON. Reports represent the latest saved run, not a permanent history. Dry runs still write local logs, state, a report, and a runtime lock; they do not change USB images or set up Python.
+
+See [GDPR-compliance.md](GDPR-compliance.md) for the technical privacy notes.
 
 ## Troubleshooting
 
-- **Execution Policy Error**: If you see a policy error, set the execution policy as described above.
-- **Python Not Found**: The script will attempt to install Python automatically. If this fails, ensure you have internet access or install Python 3.12+ manually.
-- **Ventoy Not Detected**: Make sure your USB drive is plugged in and Ventoy is properly installed.
-- **Permission Issues**: Run PowerShell as Administrator if you encounter access errors.
+- **First run downloaded nothing:** inspect the newly generated USB `sisou.toml`, select the updaters you need, and run again.
+- **Runtime failed:** check the local log for interpreter, pip, or dependency errors. A venv relies on its base Python installation; removing that installation can break it.
+- **GnuPG missing:** use `-InstallGpg` or install it separately. Continuing without GnuPG can skip signature verification.
+- **Kali / libtorrent failure:** the managed workaround can make Kali optional and disable it in config. Other updaters can proceed. Restoring native dependencies does not automatically re-enable a previously disabled config entry.
+- **Upstream mirror error:** check the SISOU log and disable the affected updater if necessary. HTTP errors, Microsoft download restrictions, and upstream parser failures cannot be fixed by reinstalling Python.
+- **Exit 60:** wait for the other runner to finish. Do not delete an active lock file to bypass protection.
+- **Interrupted download:** an incomplete file may remain. Restart or resume behavior depends on SISOU and the updater; the wrapper does not promise resumable downloads.
+
+## Development Checks
+
+Run all offline checks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Debug\test_all.ps1
+pwsh -NoProfile -File .\Debug\test_all.ps1
+```
+
+The [debug guide](Debug/README.md) describes the AST-based harness and regression tests. Tests do not install packages, access the USB, or download images. Current checks cover parsing/static analysis, example configs, real ISO header validation, process output and cleanup, cancellation flags, argument quoting, report privacy, atomic-write failures, locking, and runtime health contracts.
+
+## Project Todo List
+
+- [x] Automatic runtime management with isolated SISOU packages
+- [x] Ventoy detection, interactive menu, and command-line help
+- [x] Local logs, structured reports, and atomic state writes
+- [x] Scan controls, optional hashing, and ISO header validation
+- [x] Cancellation, process-tree cleanup, and runtime locking
+- [x] Offline regression harness and test suite
+- [ ] Modularize the application beyond its test harness
+- [ ] Cross-platform support
+- [ ] Continue checking compatibility with new SISOU versions
 
 ## Credits
 
-- [Joshua Vandaële](https://github.com/JoshuaVandaele) for [SuperISOUpdater](https://github.com/JoshuaVandaele/SuperISOUpdater)
-- [Ventoy project](https://github.com/ventoy/Ventoy)
-
-## License
-
-See repository for license details.
+[Joshua Vandaele](https://github.com/JoshuaVandaele) for SISOU and the [Ventoy project](https://github.com/ventoy/Ventoy).

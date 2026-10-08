@@ -30,20 +30,7 @@ function Assert-True {
 
 function Test-LocalIsoHeader {
     param([string]$Path)
-
-    $stream = $null
-    try {
-        $item = Get-Item -Path $Path -ErrorAction Stop
-        if ($item.Length -lt 34817) { return $false }
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
-                  [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $null = $stream.Seek(32769, [System.IO.SeekOrigin]::Begin)
-        $buf = New-Object byte[] 5
-        $read = $stream.Read($buf, 0, 5)
-        return ([System.Text.Encoding]::ASCII.GetString($buf, 0, $read) -eq 'CD001')
-    } finally {
-        if ($stream) { $stream.Dispose() }
-    }
+    return (Test-IsoHeader -File (Get-Item -LiteralPath $Path)).valid
 }
 
 Write-Host 'Checking example runner config...' -ForegroundColor Cyan
@@ -65,6 +52,11 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$parseErrors)
 Assert-True (-not $parseErrors) 'sisou-runner.ps1 has parse errors.'
+$headerFunction = $ast.Find({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Test-IsoHeader'
+}, $true)
+Set-Item -Path Function:script:Test-IsoHeader -Value $headerFunction.Body.GetScriptBlock()
 $paramBlock = $ast.ParamBlock
 $paramNames = @($paramBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
 foreach ($name in @('AdvancedConfigFile','IsoScanDepth','IncludeIsoPattern','ExcludeIsoPattern','ValidateIsoHeaders')) {
@@ -77,7 +69,7 @@ New-Item -ItemType Directory -Path $tempDir | Out-Null
 try {
     $validIso = Join-Path $tempDir 'valid.iso'
     $invalidIso = Join-Path $tempDir 'invalid.iso'
-    $bytes = New-Object byte[] 40000
+    $bytes = New-Object byte[] 34816
     [System.Text.Encoding]::ASCII.GetBytes('CD001').CopyTo($bytes, 32769)
     [System.IO.File]::WriteAllBytes($validIso, $bytes)
     [System.IO.File]::WriteAllBytes($invalidIso, (New-Object byte[] 40000))
