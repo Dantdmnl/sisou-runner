@@ -2,7 +2,7 @@
 
 A Windows PowerShell wrapper for [SuperISOUpdater (SISOU)](https://github.com/JoshuaVandaele/SuperISOUpdater) that manages ISO downloads and updates on a Ventoy drive.
 
-**Current Version:** 2.3. See [CHANGELOG.md](CHANGELOG.md) for release notes and [GitHub Releases](https://github.com/Dantdmnl/sisou-runner/releases) for published downloads.
+**Current Version:** 2.3.1. See [CHANGELOG.md](CHANGELOG.md) for release notes and [GitHub Releases](https://github.com/Dantdmnl/sisou-runner/releases) for published downloads.
 
 ## Quick Start
 
@@ -30,6 +30,19 @@ The menu offers Run, Dry run, Debug run, Help, drive selection, TOML selection,
 and a summary of the latest saved report. Enter selects a dry-run preview;
 choose 1 explicitly to download/update images. Selected drive/config settings are
 shown at the top, and Back to menu keeps supplied defaults and selections.
+
+Option **6 (Settings)** edits runner options interactively: total timeout,
+retry attempts, SHA-256 checks, ISO-header validation, SISOU upgrades, and the
+GnuPG check. Use **C** inside Settings to select a SISOU TOML file. These edits
+apply to the current session and survive Back to menu. Press **S (Save settings)**
+to persist the six runner options; Enter at a numeric prompt keeps its current value.
+
+Saved defaults load automatically from `runner-settings.json` beside the script
+(for the USB copy, `F:\runner-settings.json`). Command-line parameters override
+them. With `-AdvancedConfigFile`, Save updates that file instead, preserving its
+other options. Writes are atomic; a save failure leaves prior settings intact.
+Drive and TOML-file selections remain session-only unless configured separately
+in your runner JSON. Settings are never saved automatically on exit.
 
 Use `-Menu` to open the menu with command-line or JSON defaults:
 
@@ -105,7 +118,7 @@ Run `powershell -File .\sisou-runner.ps1 -Help` for built-in help.
 | `-LogLevel`                                 | SISOU verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL.                              |
 | `-LogDir`                                   | Override the directory for local diagnostic logs.                                    |
 | `-RetryCount`                               | Total attempts, including the first; default 2, minimum 1.                           |
-| `-TimeoutSeconds`                           | Per-attempt timeout; default 3600, minimum 30 seconds.                               |
+| `-TimeoutSeconds`                           | Total attempt limit; 0 = unlimited (default), otherwise at least 30 seconds.         |
 | `-IsoScanDepth`                             | Scan subfolder depth; default -1 (unlimited), 0 for drive root only.                 |
 | `-IncludeIsoPattern` / `-ExcludeIsoPattern` | Wildcard filters for wrapper ISO discovery.                                          |
 | `-VerifyHashes`                             | Compare SHA-256 before/after; disabled by default.                                   |
@@ -140,6 +153,12 @@ SHA-256 comparison detects content changes but is not a verification against a t
 | 130         | User cancellation recognized by the wrapper.                                             |
 
 A non-zero SISOU process exit can trigger retries with exponential backoff. Upstream per-updater errors often leave the SISOU process exit code at zero; these are counted and reported as a partial failure without automatically rerunning every updater.
+
+The total-run limit is disabled by default. It is not a network inactivity timer:
+setting `-TimeoutSeconds 7200` stops an attempt after two hours even if images are
+still downloading. Explicit timeouts stop without retrying the whole batch.
+Completed images remain on the drive; an in-progress image may need downloading
+again. Use Ctrl+C to stop an unlimited run.
 
 Use the runner's logging options rather than overriding SISOU's log file through
 `-SisouArgs`. The wrapper's log tailing and updater-error count currently follow

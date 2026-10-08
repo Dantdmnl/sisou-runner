@@ -23,6 +23,7 @@ executable as a harmless child process fixture.
 | `test_health.ps1` | SISOU version metadata and rejection of broken dependency requirements using mocked Python results. |
 | `test_inputs.ps1` | Drive shorthand normalization with mocked drive access. |
 | `test_menu.ps1` | Preview default, explicit run/debug choices, drive/config selection, returning from views, and cancellation using simulated answers. |
+| `test_timeout.ps1` | Unlimited duration, explicit total-run limits, and the production retry guard. |
 
 PSScriptAnalyzer is used when already installed. The suite does not install it;
 the syntax check reports its absence as skipped. A passing suite with that check

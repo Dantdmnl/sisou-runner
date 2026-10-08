@@ -1,7 +1,7 @@
 {
   "LogLevel": "INFO",
   "RetryCount": 3,
-  "TimeoutSeconds": 5400,
+  "TimeoutSeconds": 0,
   "HashThrottle": 4,
   "IsoScanDepth": -1,
   "IncludeIsoPattern": [

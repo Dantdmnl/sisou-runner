@@ -37,7 +37,7 @@ Write-Host 'Checking example runner config...' -ForegroundColor Cyan
 Assert-True (Test-Path $RunnerConfigPath) 'Examples/runner-config.json is missing.'
 $runnerConfig = Get-Content -Path $RunnerConfigPath -Raw | ConvertFrom-Json
 Assert-True ($runnerConfig.RetryCount -ge 1) 'RetryCount must be at least 1.'
-Assert-True ($runnerConfig.TimeoutSeconds -ge 30) 'TimeoutSeconds must be at least 30.'
+Assert-True ($runnerConfig.TimeoutSeconds -eq 0 -or $runnerConfig.TimeoutSeconds -ge 30) 'TimeoutSeconds must be 0 or at least 30.'
 Assert-True ($runnerConfig.HashThrottle -ge 1) 'HashThrottle must be at least 1.'
 Assert-True ($runnerConfig.IsoScanDepth -ge -1) 'IsoScanDepth must be -1 or greater.'
 

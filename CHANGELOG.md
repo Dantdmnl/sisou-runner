@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.1 - 2026-10-08
+
+- Add an interactive runner-settings submenu for timeout, retries, hashing, header checks, package upgrades, and GnuPG checks.
+- Preserve edited settings on menu return and record effective settings in reports.
+- Add explicit settings persistence with automatic loading of runner-settings.json, CLI precedence, and preservation of unrelated JSON options.
+- Disable the total-run timeout by default so large, active download batches are not killed after one hour.
+- Allow `-TimeoutSeconds 0` for unlimited duration; positive limits still require at least 30 seconds.
+- Stop without retrying the entire batch when an explicit total-run limit is reached.
+- Display the configured total-run limit in previews.
+
 ## 2.3 - 2026-10-08
 
 Release notes for v2.3. The previous v2.2 release and its assets remain unchanged.

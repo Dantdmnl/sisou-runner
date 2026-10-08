@@ -1,4 +1,4 @@
-# Version: 2.3
+# Version: 2.3.1
 
 <#
 .SYNOPSIS
@@ -30,7 +30,8 @@
     Total SISOU attempts on non-zero exit (default 2).
 
 .PARAMETER TimeoutSeconds
-    Per-attempt wall-clock timeout in seconds (default 3600).
+    Total wall-clock limit per SISOU attempt. Default 0 disables this limit.
+    Positive limits must be at least 30 seconds. A timeout is not retried.
 
 .PARAMETER HashThrottle
     Parallel SHA-256 threads on PS 7+ when -VerifyHashes is active (default 4).
@@ -115,7 +116,7 @@ param(
     [string]  $LogLevel,
     [string]  $LogDir,
     [int]     $RetryCount     = 2,
-    [int]     $TimeoutSeconds = 3600,
+    [int]     $TimeoutSeconds = 0,
     [int]     $HashThrottle   = 4,
     [int]     $IsoScanDepth   = -1,
     [string[]] $IncludeIsoPattern,
@@ -134,7 +135,7 @@ param(
     [string[]] $SisouArgs
 )
 
-$ScriptVersion = '2.3'
+$ScriptVersion = '2.3.1'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -196,7 +197,7 @@ OPTIONS
   -LogLevel <level>       SISOU log verbosity: DEBUG|INFO|WARNING|ERROR|CRITICAL.
   -LogDir <path>          Log directory (default: %ProgramData%\SISOU\logs).
   -RetryCount <n>         SISOU attempts on failure (default: 2).
-  -TimeoutSeconds <n>     Per-attempt timeout in seconds (default: 3600).
+  -TimeoutSeconds <n>     Total attempt limit; 0 = unlimited (default), otherwise >=30.
   -HashThrottle <n>       Parallel SHA-256 threads on PS7+ with -VerifyHashes (default: 4).
   -IsoScanDepth <n>       Max folder depth for ISO scan; -1 scans all folders.
   -IncludeIsoPattern <p>  Wildcard ISO filename include filter(s).
@@ -319,7 +320,7 @@ function Assert-ConfigValues {
     param([hashtable] $Values)
     $switchNames = @('VerifyHashes','ValidateIsoHeaders','SkipPipUpgrade','InstallGpg',
         'SkipGpgCheck','DryRun','NonInteractive','UseWinget')
-    $minimums = @{ RetryCount=1; TimeoutSeconds=30; HashThrottle=1; IsoScanDepth=-1 }
+    $minimums = @{ RetryCount=1; TimeoutSeconds=0; HashThrottle=1; IsoScanDepth=-1 }
     foreach ($key in $Values.Keys) {
         $value = $Values[$key]
         if ($switchNames -contains $key -and $value -isnot [bool]) {
@@ -342,6 +343,9 @@ function Assert-ConfigValues {
         }
         if ($key -eq 'LogLevel' -and @('DEBUG','INFO','WARNING','ERROR','CRITICAL') -notcontains $value) {
             throw 'LogLevel must be DEBUG, INFO, WARNING, ERROR, or CRITICAL.'
+        }
+        if ($key -eq 'TimeoutSeconds' -and $value -gt 0 -and $value -lt 30) {
+            throw 'TimeoutSeconds must be 0 (unlimited) or at least 30.'
         }
     }
 }
@@ -393,6 +397,19 @@ function Set-AdvancedConfigDefaults {
     $Script:DryRun = [bool]$DryRun
 }
 
+function Resolve-RunnerSettingsPath {
+    param([string] $ScriptDirectory, [string] $ExplicitPath)
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
+        return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ExplicitPath)
+    }
+    return (Join-Path $ScriptDirectory 'runner-settings.json')
+}
+
+$Script:SettingsSavePath = Resolve-RunnerSettingsPath -ScriptDirectory $PSScriptRoot -ExplicitPath $AdvancedConfigFile
+if ([string]::IsNullOrWhiteSpace($AdvancedConfigFile) -and
+    (Test-Path -LiteralPath $Script:SettingsSavePath -PathType Leaf)) {
+    $script:AdvancedConfigFile = $Script:SettingsSavePath
+}
 Set-AdvancedConfigDefaults
 
 ###############################################################################
@@ -1481,6 +1498,11 @@ function ConvertFrom-EscapedUnicode {
 # stderr  - async line reader (including tqdm carriage-return updates)
 # Ctrl+C  - native flag polled by the run loop; child process tree is stopped
 ###############################################################################
+function Test-RunTimeout {
+    param([int] $LimitSeconds, [double] $ElapsedSeconds)
+    return ($LimitSeconds -gt 0 -and $ElapsedSeconds -ge $LimitSeconds)
+}
+
 function Invoke-Sisou {
     param(
         [string]   $PythonExe,
@@ -1643,7 +1665,7 @@ function Invoke-Sisou {
 
             Start-Sleep -Milliseconds 50
             
-            if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) {
+            if (Test-RunTimeout -LimitSeconds $TimeoutSec -ElapsedSeconds $sw.Elapsed.TotalSeconds) {
                 Write-Log "Timeout (${TimeoutSec}s) - killing sisou." "WARNING"
                 Stop-ChildProcess $proc
                 $proc.WaitForExit(5000) | Out-Null
@@ -1760,9 +1782,9 @@ function Assert-Inputs {
         Write-Host "  You supplied: $RetryCount" -ForegroundColor Yellow
         exit 40
     }
-    if ($TimeoutSeconds -lt 30) {
+    if ($TimeoutSeconds -ne 0 -and $TimeoutSeconds -lt 30) {
         Write-Host '' -ForegroundColor Red
-        Write-Host 'ERROR: -TimeoutSeconds must be at least 30.' -ForegroundColor Red
+        Write-Host 'ERROR: -TimeoutSeconds must be 0 (unlimited) or at least 30.' -ForegroundColor Red
         Write-Host "  You supplied: $TimeoutSeconds" -ForegroundColor Yellow
         exit 40
     }
@@ -1853,6 +1875,9 @@ function Get-MenuParameters {
     $parameters['Menu'] = $true
     $parameters['Drive'] = $Drive
     $parameters['ConfigFile'] = $ConfigFile
+    foreach ($name in @('TimeoutSeconds','RetryCount','VerifyHashes','ValidateIsoHeaders','SkipPipUpgrade','SkipGpgCheck')) {
+        $parameters[$name] = (Get-Variable -Name $name -Scope Script).Value
+    }
     if ($LogLevel) { $parameters['LogLevel'] = $LogLevel }
     return $parameters
 }
@@ -1888,6 +1913,82 @@ function Show-LastReport {
     }
 }
 
+function Save-RunnerSettings {
+    $values = @{}
+    if (Test-Path -LiteralPath $Script:SettingsSavePath) {
+        $existing = Get-Content -LiteralPath $Script:SettingsSavePath -Raw | ConvertFrom-Json
+        if ($existing -isnot [System.Management.Automation.PSCustomObject]) {
+            throw 'Existing runner settings must be a JSON object.'
+        }
+        foreach ($property in $existing.PSObject.Properties) { $values[$property.Name] = $property.Value }
+    }
+    $values.TimeoutSeconds = $TimeoutSeconds
+    $values.RetryCount = $RetryCount
+    $values.VerifyHashes = [bool]$VerifyHashes
+    $values.ValidateIsoHeaders = [bool]$ValidateIsoHeaders
+    $values.SkipPipUpgrade = [bool]$SkipPipUpgrade
+    $values.SkipGpgCheck = [bool]$SkipGpgCheck
+    Assert-ConfigValues -Values $values
+    Write-JsonAtomic -Path $Script:SettingsSavePath -Value $values
+    return $Script:SettingsSavePath
+}
+
+function Show-RunnerSettings {
+    while (-not (Test-Cancellation)) {
+        Write-Host ''
+        Write-Host '  Runner settings' -ForegroundColor Cyan
+        Write-Host "  Save/load file: $Script:SettingsSavePath" -ForegroundColor DarkGray
+        Write-Host "  [1] Total run limit : $(if ($TimeoutSeconds -eq 0) { 'Unlimited' } else { "$TimeoutSeconds seconds" })"
+        Write-Host "  [2] Total attempts  : $RetryCount"
+        Write-Host "  [3] SHA-256 checks  : $([bool]$VerifyHashes)"
+        Write-Host "  [4] ISO headers     : $([bool]$ValidateIsoHeaders)"
+        Write-Host "  [5] Upgrade SISOU   : $(-not [bool]$SkipPipUpgrade)"
+        Write-Host "  [6] Check GnuPG     : $(-not [bool]$SkipGpgCheck)"
+        Write-Host '  [S] Save settings   [C] SISOU TOML file  [B] Back'
+        $choice = ([string](Read-Host '  Setting (Enter = back)')).Trim().ToUpper()
+        if (Test-Cancellation) { return }
+        switch ($choice) {
+            '' { return }
+            'B' { return }
+            '1' {
+                $text = ([string](Read-Host 'Seconds: 0 = unlimited, minimum 30; Enter = keep')).Trim()
+                if (-not $text) { continue }
+                $number = 0
+                if ([int]::TryParse($text, [ref]$number) -and ($number -eq 0 -or $number -ge 30)) {
+                    $script:TimeoutSeconds = $number
+                } else { Write-Host 'Enter 0 or an integer of at least 30.' -ForegroundColor Yellow }
+            }
+            '2' {
+                $text = ([string](Read-Host 'Total attempts (including first): minimum 1; Enter = keep')).Trim()
+                if (-not $text) { continue }
+                $number = 0
+                if ([int]::TryParse($text, [ref]$number) -and $number -ge 1) {
+                    $script:RetryCount = $number
+                } else { Write-Host 'Enter an integer of at least 1.' -ForegroundColor Yellow }
+            }
+            '3' { $script:VerifyHashes = -not [bool]$VerifyHashes }
+            '4' { $script:ValidateIsoHeaders = -not [bool]$ValidateIsoHeaders }
+            '5' { $script:SkipPipUpgrade = -not [bool]$SkipPipUpgrade }
+            '6' { $script:SkipGpgCheck = -not [bool]$SkipGpgCheck }
+            'S' {
+                try {
+                    $savedPath = Save-RunnerSettings
+                    Write-Host "Settings saved: $savedPath" -ForegroundColor Green
+                } catch {
+                    Write-Host "Settings could not be saved: $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+            'C' {
+                $selected = ([string](Read-Host 'TOML path (Enter = drive default)')).Trim().Trim('"')
+                if (-not $selected) { $script:ConfigFile = $null }
+                elseif (Test-Path -LiteralPath $selected -PathType Leaf) { $script:ConfigFile = ConvertTo-SisouPath $selected }
+                else { Write-Host 'Config file was not found; selection kept.' -ForegroundColor Yellow }
+            }
+            default { Write-Host 'Choose 1-6, S, C, or B.' -ForegroundColor Yellow }
+        }
+    }
+}
+
 function Show-LaunchMenu {
     $showBanner = $true
     while ($true) {
@@ -1907,7 +2008,7 @@ function Show-LaunchMenu {
             Write-Host '  [3]  Debug run      Same as Run, with verbose DEBUG logging' -ForegroundColor Yellow
             Write-Host '  [4]  Help           Show all parameters and exit codes' -ForegroundColor Gray
             Write-Host '  [5]  Drive          Select a drive letter or use auto-detect' -ForegroundColor Gray
-            Write-Host '  [6]  Config         Select a SISOU TOML file or use drive default' -ForegroundColor Gray
+            Write-Host '  [6]  Settings       Timeout, retries, validation, and SISOU config' -ForegroundColor Gray
             Write-Host '  [7]  Last report    Show the most recent saved run' -ForegroundColor Gray
             Write-Host '  [Q]  Quit'
             Write-Host ''
@@ -1942,11 +2043,7 @@ function Show-LaunchMenu {
                 $showBanner = $true
             }
             '6' {
-                $selected = ([string](Read-Host 'TOML path (Enter = drive default)')).Trim().Trim('"')
-                if (-not $selected) { $script:ConfigFile = $null }
-                elseif (Test-Path -LiteralPath $selected -PathType Leaf) {
-                    $script:ConfigFile = ConvertTo-SisouPath $selected
-                } else { Write-Host 'Config file was not found; selection kept.' -ForegroundColor Yellow }
+                Show-RunnerSettings
                 $showBanner = $true
             }
             '7' {
@@ -1975,6 +2072,7 @@ $Report = @{
     config   = @{
         advancedConfig = if ([string]::IsNullOrWhiteSpace($AdvancedConfigFile)) { $null } else { [System.IO.Path]::GetFileName($AdvancedConfigFile) }
         isoScanDepth = $IsoScanDepth
+        timeoutSeconds = $TimeoutSeconds
         includeIsoPattern = $IncludeIsoPattern
         excludeIsoPattern = $ExcludeIsoPattern
         validateIsoHeaders = [bool]$ValidateIsoHeaders
@@ -2022,6 +2120,10 @@ try {
     Write-Log "sisou-runner.ps1 v$ScriptVersion starting (PowerShell $($PSVersionTable.PSVersion))"
 
     Assert-Inputs
+    $Report.config.timeoutSeconds = $TimeoutSeconds
+    $Report.config.retryCount = $RetryCount
+    $Report.config.verifyHashes = [bool]$VerifyHashes
+    $Report.config.validateIsoHeaders = [bool]$ValidateIsoHeaders
     if (Test-Cancellation) { throw 'Cancelled before drive selection.' }
 
     # -- Ventoy selection --------------------------------------------------
@@ -2054,6 +2156,7 @@ try {
             }
             Write-Host ''
             Write-Host 'Actions that would be taken:' -ForegroundColor DarkCyan
+            Write-Host "  Total run limit: $(if ($TimeoutSeconds -eq 0) { 'Unlimited (Ctrl+C to cancel)' } else { "$TimeoutSeconds seconds; no retry on timeout" })" -ForegroundColor Gray
             Write-Host "  1. Check GnuPG availability for SISOU signature verification" -ForegroundColor Gray
             Write-Host "  2. Select a healthy Python runtime and ensure sisou imports cleanly" -ForegroundColor Gray
             Write-Host "  3. pip install --upgrade sisou$(if ($SkipPipUpgrade) { ' (skipped by -SkipPipUpgrade)' } else { '' })" -ForegroundColor Gray
@@ -2172,6 +2275,7 @@ try {
                             -TimeoutSec $TimeoutSeconds -ExtraArgs $SisouArgs
 
         $Report.sisou.exitcode = $res.ExitCode
+        $Report.sisou.timedOut = ($res.ExitCode -eq -2)
         $Report.sisou.logfile  = $res.LogFile
         # Store only a capped tail of output to avoid huge report files
         $maxChars = 4096
@@ -2191,6 +2295,11 @@ try {
         if ($res.ExitCode -eq 0) { $finalResult = $res; break }
 
         Write-Log "Non-zero exit ($($res.ExitCode))." "WARNING"
+        if ($res.ExitCode -eq -2) {
+            Write-Log 'Total run limit reached. Completed images are retained; the whole batch will not be retried.' 'WARNING'
+            $finalResult = $res
+            break
+        }
         if ($attempt -lt $maxAttempts) {
             $backoff = [Math]::Min(300, [Math]::Pow(2, $attempt))
             Write-Log "Retry in $([int]$backoff)s..."
